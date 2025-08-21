@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI催收助手 - 概念验证</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>AI催收助手 - 概念验证</h1>
+            <p class="subtitle">基于GPT-4o实时API的中文语音催收演示 (HTTP版本)</p>
+        </header>
+
+        <!-- Demo Controls -->
+        <section class="demo-controls">
+            <div class="control-group">
+                <label for="customer-select">选择客户:</label>
+                <select id="customer-select">
+                    <option value="">请选择客户...</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label for="scenario-select">催收场景:</label>
+                <select id="scenario-select">
+                    <option value="overdue_payment">逾期付款</option>
+                    <option value="payment_plan">制定还款计划</option>
+                    <option value="difficult_customer">困难客户</option>
+                    <option value="first_contact">首次联系</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <button id="start-session" class="btn btn-primary">开始对话</button>
+                <button id="end-session" class="btn btn-secondary" disabled>结束对话</button>
+                <button id="reset-session" class="btn btn-tertiary">重置</button>
+                <button id="test-btn" class="btn btn-success">测试音频</button>
+            </div>
+        </section>
+
+        <!-- Main Interface -->
+        <div class="main-interface">
+            <!-- Conversation Area -->
+            <section class="conversation-area">
+                <div class="conversation-header">
+                    <h3>对话记录</h3>
+                    <div class="connection-status">
+                        <span id="connection-indicator" class="status-indicator offline"></span>
+                        <span id="connection-text">未连接</span>
+                    </div>
+                </div>
+                
+                <div id="conversation-display" class="conversation-display">
+                    <div class="welcome-message">
+                        请选择客户并开始对话
+                    </div>
+                </div>
+
+                <!-- Audio Controls -->
+                <div class="audio-controls">
+                    <button id="record-btn" class="btn btn-record" disabled>
+                        <span class="record-icon">🎤</span>
+                        <span class="record-text">按住说话</span>
+                    </button>
+                    
+                    <div class="audio-visualization">
+                        <canvas id="audio-visualizer" width="200" height="50"></canvas>
+                    </div>
+                    
+                    <div class="audio-level">
+                        <div id="audio-level-bar" class="level-bar">
+                            <div id="audio-level-fill" class="level-fill"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Metrics Dashboard -->
+            <section class="metrics-dashboard">
+                <div class="dashboard-header">
+                    <h3>性能指标</h3>
+                    <button id="toggle-metrics" class="btn btn-small">展开</button>
+                </div>
+                
+                <div class="metrics-content" id="metrics-content">
+                    <!-- Latency Metrics -->
+                    <div class="metric-group">
+                        <h4>延迟指标</h4>
+                        <div class="metric-item">
+                            <span class="metric-label">当前延迟:</span>
+                            <span id="current-latency" class="metric-value">-- ms</span>
+                            <span id="latency-grade" class="metric-grade">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">平均延迟:</span>
+                            <span id="avg-latency" class="metric-value">-- ms</span>
+                        </div>
+                        <div class="latency-chart">
+                            <canvas id="latency-chart" width="250" height="80"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Accuracy Metrics -->
+                    <div class="metric-group">
+                        <h4>准确性指标</h4>
+                        <div class="metric-item">
+                            <span class="metric-label">语音识别:</span>
+                            <span id="speech-accuracy" class="metric-value">--%</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">回复质量:</span>
+                            <span id="response-quality" class="metric-value">--%</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">文化适宜性:</span>
+                            <span id="cultural-score" class="metric-value">--%</span>
+                        </div>
+                    </div>
+
+                    <!-- Session Stats -->
+                    <div class="metric-group">
+                        <h4>会话统计</h4>
+                        <div class="metric-item">
+                            <span class="metric-label">对话轮次:</span>
+                            <span id="turn-count" class="metric-value">0</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">会话时长:</span>
+                            <span id="session-duration" class="metric-value">00:00</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">成功率:</span>
+                            <span id="success-rate" class="metric-value">--%</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Customer Info Panel -->
+        <section class="customer-info" id="customer-info" style="display: none;">
+            <h3>客户信息</h3>
+            <div class="info-grid">
+                <div class="info-item">
+                    <label>姓名:</label>
+                    <span id="customer-name">--</span>
+                </div>
+                <div class="info-item">
+                    <label>电话:</label>
+                    <span id="customer-phone">--</span>
+                </div>
+                <div class="info-item">
+                    <label>逾期金额:</label>
+                    <span id="customer-balance">--</span>
+                </div>
+                <div class="info-item">
+                    <label>逾期天数:</label>
+                    <span id="customer-overdue">--</span>
+                </div>
+                <div class="info-item">
+                    <label>风险等级:</label>
+                    <span id="customer-risk">--</span>
+                </div>
+                <div class="info-item">
+                    <label>联系次数:</label>
+                    <span id="customer-contacts">--</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Debug Console -->
+        <section class="debug-console" id="debug-console" style="display: none;">
+            <div class="debug-header">
+                <h4>调试信息</h4>
+                <button id="toggle-debug" class="btn btn-small">显示</button>
+                <button id="clear-debug" class="btn btn-small">清除</button>
+            </div>
+            <div class="debug-content" id="debug-content">
+                <pre id="debug-log"></pre>
+            </div>
+        </section>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay" style="display: none;">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">正在连接AI助手...</div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="http-client.js"></script>
+</body>
+</html>
