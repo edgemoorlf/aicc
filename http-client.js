@@ -7,12 +7,14 @@ class AICollectionAgent {
     constructor() {
         this.isConnected = false;
         this.isRecording = false;
+        this.isListening = false; // 新增：标记是否处于持续监听状态
+        this.sessionActive = false; // 新增：标记会话是否活跃
         this.currentCustomer = null;
         this.currentScenario = 'overdue_payment';
         this.conversationHistory = [];
         this.metrics = {
             latency: [],
-            accuracy: {},
+            accuracy: [],
             sessionStart: null,
             turnCount: 0
         };
@@ -25,6 +27,10 @@ class AICollectionAgent {
         this.mediaRecorder = null;
         this.audioStream = null;
         this.audioChunks = [];
+        this.analyser = null; // 新增：用于语音活动检测
+        this.silenceTimeout = null; // 新增：静音计时器
+        this.currentAudio = null; // 新增：当前播放的音频对象
+        this.isPlayingAudio = false; // 新增：标记是否正在播放音频
         
         // 初始化
         this.init();
@@ -137,14 +143,13 @@ class AICollectionAgent {
     }
 
     bindEvents() {
-        // 开始会话
-        document.getElementById('start-session').addEventListener('click', () => {
-            this.startSession();
-        });
-
-        // 结束会话
-        document.getElementById('end-session').addEventListener('click', () => {
-            this.endSession();
+        // 会话切换（开始/结束）
+        document.getElementById('session-toggle').addEventListener('click', () => {
+            if (this.sessionActive) {
+                this.endSession();
+            } else {
+                this.startSession();
+            }
         });
 
         // 重置会话
@@ -163,21 +168,19 @@ class AICollectionAgent {
             this.debugLog('场景切换: ' + e.target.value);
         });
 
-        // 录音按钮 - 按住说话
+        // 录音按钮 - 改为切换监听模式按钮
         const recordBtn = document.getElementById('record-btn');
-        recordBtn.addEventListener('mousedown', () => this.startRecording());
-        recordBtn.addEventListener('mouseup', () => this.stopRecording());
-        recordBtn.addEventListener('mouseleave', () => this.stopRecording());
+        recordBtn.addEventListener('click', () => this.toggleListening());
         
-        // 触屏设备支持
-        recordBtn.addEventListener('touchstart', (e) => {
-            e.preventDefault();
-            this.startRecording();
-        });
-        recordBtn.addEventListener('touchend', (e) => {
-            e.preventDefault();
-            this.stopRecording();
-        });
+        // 移除触屏设备支持 (不再需要push-to-talk)
+        // recordBtn.addEventListener('touchstart', (e) => {
+        //     e.preventDefault();
+        //     this.startRecording();
+        // });
+        // recordBtn.addEventListener('touchend', (e) => {
+        //     e.preventDefault();
+        //     this.stopRecording();
+        // });
 
         // 指标面板切换
         document.getElementById('toggle-metrics').addEventListener('click', () => {
@@ -241,6 +244,25 @@ class AICollectionAgent {
         return labels[level] || level;
     }
 
+    // 将数字转换为大陆标准中文表达
+    formatChineseAmount(amount) {
+        if (amount >= 10000) {
+            const wan = Math.floor(amount / 10000);
+            const remainder = amount % 10000;
+            if (remainder === 0) {
+                return `${wan}万元`;
+            } else if (remainder < 1000) {
+                return `${wan}万零${remainder}元`;
+            } else {
+                return `${wan}万${remainder}元`;
+            }
+        } else if (amount >= 1000) {
+            return `${amount}元`;
+        } else {
+            return `${amount}元`;
+        }
+    }
+
     async startSession() {
         if (!this.currentCustomer) {
             alert('请先选择一个客户');
@@ -253,34 +275,25 @@ class AICollectionAgent {
         }
 
         try {
-            this.showLoading(true);
-            this.updateConnectionStatus('connecting', '正在准备会话...');
-            
-            // 设置会话
+            // 设置会话 (无需连接延迟，服务器保持持久连接)
             this.setupSession();
+            this.sessionActive = true;
             
-            this.showLoading(false);
             this.updateConnectionStatus('online', '会话已就绪');
             
-            // 启用控制按钮
-            document.getElementById('start-session').disabled = true;
-            document.getElementById('end-session').disabled = false;
-            document.getElementById('record-btn').disabled = false;
+            // 更新按钮状态
+            this.updateSessionButtons();
             
-            // 显示欢迎消息
-            const display = document.getElementById('conversation-display');
-            display.innerHTML = '<div class="message assistant">您好！我是平安银行，工号888888，今天联系您是关于您的账户情况。</div>';
+            // 自动开始持续监听
+            await this.startContinuousListening();
             
             this.debugLog('会话开始 - 客户: ' + this.currentCustomer.name);
             
-            // 自动播放初始问候语
-            setTimeout(() => {
-                this.speakInitialGreeting();
-            }, 1000);
+            // 立即播放初始问候语 (无延迟)
+            this.speakInitialGreeting();
             
         } catch (error) {
             console.error('启动会话失败:', error);
-            this.showLoading(false);
             this.updateConnectionStatus('offline', '会话启动失败');
             alert('会话启动失败: ' + error.message);
             this.debugLog('错误: 会话启动失败 - ' + error.message);
@@ -296,8 +309,33 @@ class AICollectionAgent {
         this.startMetricsUpdate();
     }
 
-    async startRecording() {
-        if (!this.isConnected || this.isRecording) return;
+    updateSessionButtons() {
+        const toggleBtn = document.getElementById('session-toggle');
+        const recordBtn = document.getElementById('record-btn');
+        
+        if (this.sessionActive) {
+            toggleBtn.textContent = '结束对话';
+            toggleBtn.className = 'btn btn-secondary';
+            recordBtn.disabled = false;
+        } else {
+            toggleBtn.textContent = '开始对话';
+            toggleBtn.className = 'btn btn-primary';
+            recordBtn.disabled = true;
+        }
+    }
+
+    // 新增方法：切换监听模式
+    async toggleListening() {
+        if (this.isListening) {
+            this.stopContinuousListening();
+        } else {
+            await this.startContinuousListening();
+        }
+    }
+
+    // 新增方法：开始持续监听
+    async startContinuousListening() {
+        if (this.isListening) return;
 
         try {
             // 获取麦克风权限
@@ -309,6 +347,126 @@ class AICollectionAgent {
                     noiseSuppression: true
                 } 
             });
+
+            // 创建音频分析器用于语音活动检测
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            this.audioContext = this.audioContext || new AudioContextClass();
+            const source = this.audioContext.createMediaStreamSource(this.audioStream);
+            this.analyser = this.audioContext.createAnalyser();
+            this.analyser.fftSize = 256;
+            source.connect(this.analyser);
+
+            this.isListening = true;
+            this.updateListeningUI(true);
+            
+            // 开始语音活动检测
+            this.startVoiceActivityDetection();
+            
+            this.debugLog('持续监听已开启');
+
+        } catch (error) {
+            console.error('开始持续监听失败:', error);
+            this.debugLog('错误: 持续监听失败 - ' + error.message);
+            alert('无法开启麦克风，请确保已授权麦克风权限');
+        }
+    }
+
+    // 新增方法：停止持续监听
+    stopContinuousListening() {
+        if (!this.isListening) return;
+
+        this.isListening = false;
+        
+        if (this.audioStream) {
+            this.audioStream.getTracks().forEach(track => track.stop());
+        }
+        
+        this.updateListeningUI(false);
+        this.debugLog('持续监听已关闭');
+    }
+
+    // 新增方法：语音活动检测
+    startVoiceActivityDetection() {
+        const bufferLength = this.analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+        let speechDetected = false;
+        let silenceStart = null;
+
+        const detectVoice = () => {
+            if (!this.isListening) return;
+
+            this.analyser.getByteFrequencyData(dataArray);
+            
+            // 计算音频能量
+            const average = dataArray.reduce((sum, value) => sum + value, 0) / bufferLength;
+            const threshold = 30; // 语音检测阈值，可调整
+            
+            if (average > threshold) {
+                // 检测到语音
+                if (!speechDetected) {
+                    speechDetected = true;
+                    silenceStart = null;
+                    
+                    // 如果代理正在说话，立即停止
+                    if (this.isPlayingAudio) {
+                        this.stopCurrentAudio();
+                        this.debugLog('客户开始说话，中断代理音频');
+                    }
+                    
+                    this.startRecording();
+                    this.debugLog('检测到语音，开始录音');
+                }
+            } else {
+                // 静音状态
+                if (speechDetected && !silenceStart) {
+                    silenceStart = Date.now();
+                }
+                
+                // 静音超过1.5秒，停止录音
+                if (speechDetected && silenceStart && Date.now() - silenceStart > 1500) {
+                    speechDetected = false;
+                    silenceStart = null;
+                    this.stopRecording();
+                    this.debugLog('检测到静音，停止录音');
+                }
+            }
+            
+            // 继续检测
+            requestAnimationFrame(detectVoice);
+        };
+
+        detectVoice();
+    }
+
+    // 更新监听UI
+    updateListeningUI(listening) {
+        const btn = document.getElementById('record-btn');
+        const text = btn.querySelector('.record-text');
+        
+        if (listening) {
+            btn.classList.add('listening');
+            text.textContent = '正在监听';
+        } else {
+            btn.classList.remove('listening');
+            text.textContent = '开始监听';
+        }
+    }
+
+    async startRecording() {
+        if (!this.isConnected || this.isRecording) return;
+
+        try {
+            // 在持续监听模式下，音频流已经存在
+            if (!this.audioStream) {
+                this.audioStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    } 
+                });
+            }
 
             // 创建MediaRecorder
             this.mediaRecorder = new MediaRecorder(this.audioStream, {
@@ -330,14 +488,18 @@ class AICollectionAgent {
 
             this.mediaRecorder.start(100);
 
-            // 更新UI
-            this.updateRecordingUI(true);
+            // 更新UI (仅在非持续监听模式下)
+            if (!this.isListening) {
+                this.updateRecordingUI(true);
+            }
             this.debugLog('开始录音...');
 
         } catch (error) {
             console.error('开始录音失败:', error);
             this.debugLog('错误: 录音失败 - ' + error.message);
-            alert('录音失败，请确保已授权麦克风权限');
+            if (!this.isListening) {
+                alert('录音失败，请确保已授权麦克风权限');
+            }
         }
     }
 
@@ -346,10 +508,16 @@ class AICollectionAgent {
 
         this.isRecording = false;
         this.mediaRecorder.stop();
-        this.audioStream.getTracks().forEach(track => track.stop());
+        
+        // 在持续监听模式下不关闭音频流
+        if (!this.isListening && this.audioStream) {
+            this.audioStream.getTracks().forEach(track => track.stop());
+        }
 
-        // 更新UI
-        this.updateRecordingUI(false);
+        // 更新UI (仅在非持续监听模式下)
+        if (!this.isListening) {
+            this.updateRecordingUI(false);
+        }
         this.debugLog('录音结束，正在处理...');
     }
 
@@ -370,8 +538,6 @@ class AICollectionAgent {
         if (this.audioChunks.length === 0) return;
 
         try {
-            this.showLoading(true, '正在处理语音...');
-            
             // 合并音频数据
             const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm;codecs=opus' });
             
@@ -379,29 +545,48 @@ class AICollectionAgent {
             const transcript = await this.recognizeSpeech(audioBlob);
             
             if (transcript) {
-                this.displayMessage('user', transcript);
-                
-                // 发送到HTTP服务器获取AI回复
+                // 发送到HTTP服务器获取AI回复 (不在这里显示消息，避免重复)
                 await this.sendMessageToAI(transcript);
             } else {
                 this.debugLog('未识别到有效语音');
-                this.showLoading(false);
             }
             
         } catch (error) {
             console.error('音频处理失败:', error);
             this.debugLog('错误: 音频处理失败 - ' + error.message);
-            this.showLoading(false);
         }
     }
 
     async speakInitialGreeting() {
         try {
-            this.showLoading(true, '正在播放初始问候...');
-            
             const customer = this.currentCustomer;
-            const initialMessage = `您好${customer.name}，我是平安银行催收专员，工号888888。根据我行记录，您有一笔${customer.balance.toLocaleString()}元的逾期本金，已逾期${customer.daysOverdue}天。您的逾期记录已上报征信系统，请您尽快处理还款事宜。请问您现在方便谈论还款安排吗？`;
             
+            // 停止任何当前播放的音频
+            this.stopCurrentAudio();
+            
+            // 播放预录制的通用问候语 "喂，您好"
+            const greetingAudio = new Audio('greeting.wav');
+            this.currentAudio = greetingAudio;
+            this.isPlayingAudio = true;
+            
+            await new Promise((resolve, reject) => {
+                greetingAudio.onended = () => {
+                    this.currentAudio = null;
+                    this.isPlayingAudio = false;
+                    resolve();
+                };
+                greetingAudio.onerror = (error) => {
+                    this.currentAudio = null;
+                    this.isPlayingAudio = false;
+                    reject(error);
+                };
+                greetingAudio.play().catch(reject);
+            });
+            
+            // 显示并播放个性化初始问候文本
+            const initialMessage = `您好${customer.name}，我是平安银行催收专员，工号888888。根据我行记录，您有一笔${this.formatChineseAmount(customer.balance)}的逾期本金，已逾期${customer.daysOverdue}天。您的逾期记录已上报征信系统，请您尽快处理还款事宜。请问您现在方便谈论还款安排吗？`;
+            this.displayMessage('assistant', initialMessage);
+
             const response = await fetch(`${this.serverUrl}/api/chat`, {
                 method: 'POST',
                 headers: {
@@ -417,16 +602,20 @@ class AICollectionAgent {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
-            const audioBlob = await response.blob();
-            await this.playAudioResponse(audioBlob);
+            const responseData = await response.json();
             
-            this.showLoading(false);
+            // 播放个性化问候音频 (会自动停止之前的音频)
+            if (responseData.audio) {
+                const audioBlob = new Blob([new Uint8Array(responseData.audio)], { type: 'audio/wav' });
+                await this.playAudioResponse(audioBlob);
+            }
+            
             this.debugLog('初始问候完成，等待客户回复');
             
         } catch (error) {
             console.error('播放初始问候失败:', error);
             this.debugLog('初始问候失败: ' + error.message);
-            this.showLoading(false);
+            this.isPlayingAudio = false;
         }
     }
 
@@ -508,27 +697,36 @@ class AICollectionAgent {
             // Display the customer message first
             this.displayMessage('user', message);
             
-            // 获取音频响应
-            const audioBlob = await response.blob();
+            // 获取响应 (包含音频和文本)
+            const responseData = await response.json();
             
             // 播放音频
-            await this.playAudioResponse(audioBlob);
+            if (responseData.audio) {
+                const audioBlob = new Blob([new Uint8Array(responseData.audio)], { type: 'audio/wav' });
+                await this.playAudioResponse(audioBlob);
+            }
             
-            // Record the AI response (we need to extract the text from the AI response)
-            // For now, we'll add a placeholder and update it when we get the transcript
-            this.displayMessage('assistant', '[语音回复]');
+            // 显示AI的文本回复
+            if (responseData.text) {
+                this.displayMessage('assistant', responseData.text);
+            } else {
+                this.displayMessage('assistant', '[语音回复]');
+            }
             
             // 更新指标
             this.updateLatencyMetrics(responseTime);
             this.updateSessionStats();
             
-            this.showLoading(false);
+            // 评估转录准确性（如果有AI回复文本）
+            if (responseData.text && message) {
+                this.evaluateTranscriptAccuracy(responseData.text, message);
+            }
+            
             this.debugLog(`AI回复完成，耗时: ${responseTime}ms`);
             
         } catch (error) {
             console.error('发送消息失败:', error);
             this.debugLog('错误: AI回复失败 - ' + error.message);
-            this.showLoading(false);
             
             // 显示错误消息
             this.displayMessage('assistant', '抱歉，我暂时无法回复。请稍后重试。');
@@ -559,41 +757,59 @@ class AICollectionAgent {
             conversationHistoryText = `\n本次通话记录:\n1. 客户: ${userMessage}\n`;
         }
 
-        const systemContext = `你是平安银行的专业催收员，正在进行电话催收工作。
+        const systemContext = `你是平安银行信用卡中心的专业催收专员，正在进行电话催收工作。
 
 客户档案信息:
 - 客户姓名: ${customer.name}
-- 逾期本金: ¥${customer.balance.toLocaleString()}
+- 逾期本金: ${this.formatChineseAmount(customer.balance)}
 - 逾期天数: ${customer.daysOverdue}天
 - 联系历史: ${customer.previousContacts}次
 - 风险等级: ${customer.riskLevel}
 
 当前催收场景: ${scenarios[scenario]}
 ${conversationHistoryText}
-催收员工作职责:
-1. 明确告知客户逾期情况和还款义务
-2. 了解客户还款困难和实际情况  
-3. 提出具体可行的还款解决方案
-4. 强调逾期对征信和法律后果的影响
-5. 记录客户承诺和还款计划
-6. 设定明确的后续联系时间节点
-7. 不要讨论和催收无关的话题 Do NOT talk anything unrelated to collection.
-8. 基于上述通话记录，避免重复询问已经讨论过的内容
 
-专业催收话术要点:
-- 使用"逾期本金"、"还款义务"、"征信记录"等专业术语
-- 强调银行的合法催收权利和客户的法定义务
-- 提及征信系统影响："您的逾期记录已上报征信系统"
-- 法律后果警示："我行保留通过法律途径追讨的权利"
-- 解决方案导向："我们可以协商制定分期还款计划"
+基于真实催收对话的标准话术:
 
-请基于完整的通话记录，以专业催收员的身份回应客户最新的话语。要体现催收员的权威性和专业性，同时依法合规。避免重复之前已经讨论过的内容。`;
+【核实确认】
+- "我看您这边的话在[日期]还了一笔，还了[金额]"
+- "当前的话还差[具体金额]，没有还够"
+
+【理解回应】  
+- "也没有人说有钱不去还这个信用卡的，我可以理解"
+- "可以理解，您的还款压力确实也是挺大的"
+
+【方案提供】
+- "当前的话还是属于一个内部协商"
+- "银行这边可以帮您减免一部分息费"
+- "还可以帮您去撤销这个余薪案件的"
+
+【专业用语】
+- 使用"您这边的话"、"当前的话"、"是吧"等真实催收用语
+- 使用"内部协商"、"余薪案件"、"全额减免方案政策"等专业术语
+
+【重要原则】
+1. 保持理解耐心的态度，避免强硬施压
+2. 用具体数据建立可信度  
+3. 提供多种解决方案
+4. 关注客户感受和实际困难
+5. 使用银行专业术语增强权威性
+
+其它注意语言事项:
+- 使用大陆标准普通话，避免使用台湾或香港的用语，及台湾国语
+- 15,000元应该被称为"一万五千元"，而不是"十五千元"
+- 语气要专业、理解，体现人文关怀
+
+请基于完整的通话记录和真实催收对话模式，以专业催收员的身份回应客户最新的话语。要体现催收员的专业性和人文关怀，避免重复之前已经讨论过的内容。`;
 
         return systemContext;
     }
 
     async playAudioResponse(audioBlob) {
         try {
+            // 停止当前正在播放的音频
+            this.stopCurrentAudio();
+            
             // 确保音频上下文已激活
             if (this.audioContext.state === 'suspended') {
                 await this.audioContext.resume();
@@ -603,15 +819,33 @@ ${conversationHistoryText}
             const audioUrl = URL.createObjectURL(audioBlob);
             const audio = new Audio(audioUrl);
             
+            // 设置为当前音频对象
+            this.currentAudio = audio;
+            this.isPlayingAudio = true;
+            
             return new Promise((resolve, reject) => {
                 audio.onended = () => {
                     URL.revokeObjectURL(audioUrl);
+                    this.currentAudio = null;
+                    this.isPlayingAudio = false;
                     resolve();
                 };
                 
                 audio.onerror = (error) => {
                     URL.revokeObjectURL(audioUrl);
+                    this.currentAudio = null;
+                    this.isPlayingAudio = false;
                     reject(error);
+                };
+                
+                // 检查是否在播放开始前就被停止了
+                audio.onpause = () => {
+                    if (this.currentAudio === audio) {
+                        URL.revokeObjectURL(audioUrl);
+                        this.currentAudio = null;
+                        this.isPlayingAudio = false;
+                        resolve();
+                    }
                 };
                 
                 audio.play().catch(reject);
@@ -620,8 +854,19 @@ ${conversationHistoryText}
         } catch (error) {
             console.error('播放音频失败:', error);
             this.debugLog('音频播放错误: ' + error.message);
+            this.isPlayingAudio = false;
             throw error;
         }
+    }
+
+    // 新增方法：停止当前播放的音频
+    stopCurrentAudio() {
+        if (this.currentAudio && !this.currentAudio.paused) {
+            this.currentAudio.pause();
+            this.currentAudio.currentTime = 0;
+            this.debugLog('停止当前播放的音频');
+        }
+        this.isPlayingAudio = false;
     }
 
     displayMessage(sender, text) {
@@ -650,8 +895,6 @@ ${conversationHistoryText}
     // 测试功能
     async testAudio() {
         try {
-            this.showLoading(true, '测试音频生成...');
-            
             const testMessage = '你好，这是一个测试消息。请确认你能听到清晰的中文语音。';
             
             const response = await fetch(`${this.serverUrl}/api/chat`, {
@@ -672,12 +915,10 @@ ${conversationHistoryText}
             await this.playAudioResponse(audioBlob);
             
             this.debugLog('音频测试完成');
-            this.showLoading(false);
             
         } catch (error) {
             console.error('音频测试失败:', error);
             this.debugLog('音频测试失败: ' + error.message);
-            this.showLoading(false);
         }
     }
 
@@ -739,6 +980,119 @@ ${conversationHistoryText}
         }, 1000);
     }
 
+    // 评估转录准确性
+    async evaluateTranscriptAccuracy(originalText, spokenText) {
+        try {
+            this.debugLog('开始评估转录准确性...');
+            
+            const response = await fetch(`${this.serverUrl}/api/evaluate-accuracy`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    originalText: originalText,
+                    spokenText: spokenText,
+                    context: `银行催收对话，客户: ${this.currentCustomer?.name}, 场景: ${this.currentScenario}`
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`评估请求失败: ${response.status}`);
+            }
+
+            const evaluation = await response.json();
+            
+            // 更新准确性指标显示
+            this.updateAccuracyMetrics(evaluation);
+            
+            this.debugLog(`准确性评估完成: ${evaluation.overall_score}分 (${evaluation.grade})`);
+            
+        } catch (error) {
+            console.error('准确性评估失败:', error);
+            this.debugLog('准确性评估失败: ' + error.message);
+        }
+    }
+
+    // 更新准确性指标显示
+    updateAccuracyMetrics(evaluation) {
+        // 更新语音识别准确性
+        const speechAccuracy = evaluation.vocabulary_accuracy || 0;
+        document.getElementById('speech-accuracy').textContent = speechAccuracy + '%';
+        
+        // 更新回复质量（语义完整性）
+        const responseQuality = evaluation.semantic_completeness || 0;
+        document.getElementById('response-quality').textContent = responseQuality + '%';
+        
+        // 更新文化适宜性（专业术语准确性）
+        const culturalScore = evaluation.terminology_accuracy || 0;
+        document.getElementById('cultural-score').textContent = culturalScore + '%';
+        
+        // 保存评估历史用于计算平均值
+        if (!this.metrics.accuracy) {
+            this.metrics.accuracy = [];
+        }
+        
+        this.metrics.accuracy.push({
+            overall: evaluation.overall_score || 0,
+            vocabulary: evaluation.vocabulary_accuracy || 0,
+            semantic: evaluation.semantic_completeness || 0,
+            terminology: evaluation.terminology_accuracy || 0,
+            comprehensibility: evaluation.comprehensibility || 0,
+            grade: evaluation.grade || 'unknown',
+            timestamp: Date.now()
+        });
+        
+        // 计算并显示平均准确性
+        this.updateAverageAccuracy();
+    }
+
+    // 更新平均准确性显示
+    updateAverageAccuracy() {
+        if (!this.metrics.accuracy || this.metrics.accuracy.length === 0) return;
+        
+        const accuracyData = this.metrics.accuracy;
+        const count = accuracyData.length;
+        
+        // 计算各项平均值
+        const avgVocabulary = Math.round(accuracyData.reduce((sum, item) => sum + item.vocabulary, 0) / count);
+        const avgSemantic = Math.round(accuracyData.reduce((sum, item) => sum + item.semantic, 0) / count);
+        const avgTerminology = Math.round(accuracyData.reduce((sum, item) => sum + item.terminology, 0) / count);
+        
+        // 更新显示（考虑使用平均值或最新值）
+        document.getElementById('speech-accuracy').textContent = avgVocabulary + '%';
+        document.getElementById('response-quality').textContent = avgSemantic + '%';
+        document.getElementById('cultural-score').textContent = avgTerminology + '%';
+        
+        // 添加等级指示器
+        this.updateAccuracyGrades(avgVocabulary, avgSemantic, avgTerminology);
+    }
+
+    // 更新准确性等级指示器
+    updateAccuracyGrades(vocabulary, semantic, terminology) {
+        const getGradeClass = (score) => {
+            if (score >= 90) return 'excellent';
+            if (score >= 75) return 'good';
+            if (score >= 60) return 'acceptable';
+            return 'poor';
+        };
+        
+        // 为准确性指标添加颜色编码
+        const speechElement = document.getElementById('speech-accuracy');
+        const responseElement = document.getElementById('response-quality');
+        const culturalElement = document.getElementById('cultural-score');
+        
+        if (speechElement) {
+            speechElement.className = `metric-value accuracy-${getGradeClass(vocabulary)}`;
+        }
+        if (responseElement) {
+            responseElement.className = `metric-value accuracy-${getGradeClass(semantic)}`;
+        }
+        if (culturalElement) {
+            culturalElement.className = `metric-value accuracy-${getGradeClass(terminology)}`;
+        }
+    }
+
     toggleMetrics() {
         const content = document.getElementById('metrics-content');
         const btn = document.getElementById('toggle-metrics');
@@ -781,12 +1135,17 @@ ${conversationHistoryText}
             clearInterval(this.metricsInterval);
         }
         
+        // 停止持续监听
+        this.stopContinuousListening();
+        
+        // 停止当前播放的音频
+        this.stopCurrentAudio();
+        
+        this.sessionActive = false;
         this.updateConnectionStatus('offline', '会话已结束');
         
-        // 更新UI状态
-        document.getElementById('start-session').disabled = false;
-        document.getElementById('end-session').disabled = true;
-        document.getElementById('record-btn').disabled = true;
+        // 更新按钮状态
+        this.updateSessionButtons();
         
         this.debugLog('会话结束');
     }
@@ -796,9 +1155,10 @@ ${conversationHistoryText}
         
         // 重置数据
         this.conversationHistory = [];
+        this.sessionActive = false;
         this.metrics = {
             latency: [],
-            accuracy: {},
+            accuracy: [],
             sessionStart: null,
             turnCount: 0
         };
@@ -815,6 +1175,20 @@ ${conversationHistoryText}
         document.getElementById('turn-count').textContent = '0';
         document.getElementById('session-duration').textContent = '00:00';
         document.getElementById('success-rate').textContent = '--%';
+        
+        // 重置准确性指标显示
+        document.getElementById('speech-accuracy').textContent = '--%';
+        document.getElementById('response-quality').textContent = '--%';
+        document.getElementById('cultural-score').textContent = '--%';
+        
+        // 清除准确性等级样式
+        const accuracyElements = ['speech-accuracy', 'response-quality', 'cultural-score'];
+        accuracyElements.forEach(id => {
+            const element = document.getElementById(id);
+            if (element) {
+                element.className = 'metric-value';
+            }
+        });
         
         this.currentCustomer = null;
         this.debugLog('会话已重置');

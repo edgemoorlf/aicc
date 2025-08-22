@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI催收助手 - 概念验证</title>
+    <title>AI催收员</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico">
     <link rel="stylesheet" href="style.css">
 </head>
@@ -11,34 +11,64 @@
     <div class="container">
         <!-- Header -->
         <header class="header">
-            <h1>AI催收助手 - 概念验证</h1>
-            <p class="subtitle">基于GPT-4o实时API的中文语音催收演示 (HTTP版本)</p>
+            <h1>AI催收员 - POC</h1>
         </header>
 
         <!-- Demo Controls -->
         <section class="demo-controls">
             <div class="control-group">
-                <label for="customer-select">选择客户:</label>
+                <label for="customer-select">客户:</label>
                 <select id="customer-select">
-                    <option value="">请选择客户...</option>
+                    <option value="">选择客户...</option>
                 </select>
             </div>
             
             <div class="control-group">
-                <label for="scenario-select">催收场景:</label>
+                <label for="scenario-select">场景:</label>
                 <select id="scenario-select">
                     <option value="overdue_payment">逾期付款</option>
-                    <option value="payment_plan">制定还款计划</option>
+                    <option value="payment_plan">还款计划</option>
                     <option value="difficult_customer">困难客户</option>
                     <option value="first_contact">首次联系</option>
                 </select>
             </div>
 
-            <div class="control-group">
-                <button id="start-session" class="btn btn-primary">开始对话</button>
-                <button id="end-session" class="btn btn-secondary" disabled>结束对话</button>
-                <button id="reset-session" class="btn btn-tertiary">重置</button>
-                <button id="test-btn" class="btn btn-success">测试音频</button>
+            <button id="session-toggle" class="btn btn-primary">开始对话</button>
+            <button id="record-btn" class="btn btn-success" disabled>
+                <span class="record-text">开始监听</span>
+            </button>
+            <button id="reset-session" class="btn btn-tertiary">重置</button>
+            <button id="test-btn" class="btn btn-success">测试音频</button>
+        </section>
+
+        <!-- Customer Info Panel -->
+        <section class="customer-info" id="customer-info" style="display: none;">
+            <h3>客户信息</h3>
+            <div class="info-grid">
+                <div class="info-item">
+                    <label>姓名:</label>
+                    <span id="customer-name">--</span>
+                </div>
+                <div class="info-item">
+                    <label>电话:</label>
+                    <span id="customer-phone">--</span>
+                </div>
+                <div class="info-item">
+                    <label>逾期金额:</label>
+                    <span id="customer-balance">--</span>
+                </div>
+                <div class="info-item">
+                    <label>逾期天数:</label>
+                    <span id="customer-overdue">--</span>
+                </div>
+                <div class="info-item">
+                    <label>风险等级:</label>
+                    <span id="customer-risk">--</span>
+                </div>
+                <div class="info-item">
+                    <label>联系次数:</label>
+                    <span id="customer-contacts">--</span>
+                </div>
             </div>
         </section>
 
@@ -57,24 +87,6 @@
                 <div id="conversation-display" class="conversation-display">
                     <div class="welcome-message">
                         请选择客户并开始对话
-                    </div>
-                </div>
-
-                <!-- Audio Controls -->
-                <div class="audio-controls">
-                    <button id="record-btn" class="btn btn-record" disabled>
-                        <span class="record-icon">🎤</span>
-                        <span class="record-text">按住说话</span>
-                    </button>
-                    
-                    <div class="audio-visualization">
-                        <canvas id="audio-visualizer" width="200" height="50"></canvas>
-                    </div>
-                    
-                    <div class="audio-level">
-                        <div id="audio-level-bar" class="level-bar">
-                            <div id="audio-level-fill" class="level-fill"></div>
-                        </div>
                     </div>
                 </div>
             </section>
@@ -140,37 +152,6 @@
                 </div>
             </section>
         </div>
-
-        <!-- Customer Info Panel -->
-        <section class="customer-info" id="customer-info" style="display: none;">
-            <h3>客户信息</h3>
-            <div class="info-grid">
-                <div class="info-item">
-                    <label>姓名:</label>
-                    <span id="customer-name">--</span>
-                </div>
-                <div class="info-item">
-                    <label>电话:</label>
-                    <span id="customer-phone">--</span>
-                </div>
-                <div class="info-item">
-                    <label>逾期金额:</label>
-                    <span id="customer-balance">--</span>
-                </div>
-                <div class="info-item">
-                    <label>逾期天数:</label>
-                    <span id="customer-overdue">--</span>
-                </div>
-                <div class="info-item">
-                    <label>风险等级:</label>
-                    <span id="customer-risk">--</span>
-                </div>
-                <div class="info-item">
-                    <label>联系次数:</label>
-                    <span id="customer-contacts">--</span>
-                </div>
-            </div>
-        </section>
 
         <!-- Debug Console -->
         <section class="debug-console" id="debug-console" style="display: none;">

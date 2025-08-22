@@ -211,3 +211,5 @@ playwright-report/
 test-results/
 test*
 *.md
+*.backup
+data/

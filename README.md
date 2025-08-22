@@ -29,6 +29,8 @@
 ### ✅ Real Audio Processing
 - **Customer Speech Recognition**: Automatic transcription via OpenAI Whisper
 - **AI Voice Generation**: Clear Chinese speech synthesis
+- **Audio Management**: Single voice playback prevents overlapping agent responses
+- **Customer Interruption**: Voice Activity Detection allows real-time interruption
 - **Conversation Flow**: Customer speaks → Transcribed → AI responds → Speech
 - **No Manual Input Required**: Eliminates demo-breaking text entry
 

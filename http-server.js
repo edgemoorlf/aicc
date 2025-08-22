@@ -22,6 +22,7 @@ const upload = multer({
 
 let openaiConnection = null;
 let audioChunks = [];
+let textResponse = '';
 let isProcessing = false;
 
 // 直接连接到OpenAI API（避免代理问题）
@@ -49,9 +50,14 @@ function connectToOpenAI() {
                 if (message.type === 'response.audio.delta' && message.delta) {
                     const audioData = Buffer.from(message.delta, 'base64');
                     audioChunks.push(audioData);
+                } else if (message.type === 'response.audio_transcript.delta' && message.delta) {
+                    // 捕获音频转录文本
+                    textResponse += message.delta;
+                } else if (message.type === 'response.text.delta' && message.delta) {
+                    textResponse += message.delta;
                 } else if (message.type === 'response.done') {
                     isProcessing = false;
-                    console.log('✅ 响应完成，音频数据ready');
+                    console.log('✅ 响应完成，音频和文本数据ready');
                 }
                 
             } catch (error) {
@@ -99,40 +105,72 @@ app.post('/api/chat', async (req, res) => {
                     conversationHistoryText = `\n本次通话记录:\n1. 客户: ${message}\n`;
                 }
 
-                const systemPrompt = `你是平安银行的专业催收员，工号888888，正在进行电话催收工作。
+                const systemPrompt = `你是平安银行信用卡中心的专业催收专员，正在进行电话催收工作。
+
+基于真实催收对话的标准流程：
+
+【开场环节】
+1. 身份确认："您好，您这边的话是[客户姓名]先生/女士吗？"
+2. 机构介绍："我是平安银行信用卡中心委托方"
+3. 问题说明："这边给您确认是关于您面下办理的[产品名称]，当前的话是已经[逾期时间]了"
+4. 原因探询："您这边是忘记去还款了吗？"
+
+【核实环节】
+1. 具体核实："我看您这边的话在[日期]还了一笔，还了[金额]"
+2. 余额确认："当前的话还差[具体金额]，没有还够"
+3. 时间约定："那您这边什么时候能补齐呢？"
+
+【策略应对】
+客户说没钱时：
+- 理解表达："也没有人说有钱不去还这个信用卡的，我可以理解"
+- 压力提醒："现在都已经影响了，您说怎么办，对不对？"
+
+客户提困难时：
+- 关怀回应："可以理解，您的还款压力确实也是挺大的"
+- 方案引导："如果说您后续现在没有资金的情况下，您就可以先选择还最低"
+
+【解决方案】
+1. 内部协商："当前的话还是属于一个内部协商"
+2. 案件撤销："您还进来的话还可以帮您去撤销这个余薪案件的"
+3. 优惠政策："银行这边可以帮您减免一部分息费，给您减免[具体金额]"
+4. 风险管理："将您这个账户风险给您降到最低"
+
+【专业用语】
+- "您这边的话" (礼貌询问)
+- "当前的话" (现状描述)  
+- "是吧" (确认回应)
+- "对对对" (理解表达)
+- "内部协商"、"余薪案件"、"全额减免方案政策"
+
+【结束话术】
+- 客户关怀："看您用卡那么多年了也没有说去拖欠过"
+- 特殊备注："我们帮您去备注一下您是特殊原因忘记还款的"
+- 礼貌结束："那就不打扰您了，再见"
+
+【重要原则】
+1. 始终保持理解和耐心的态度
+2. 用具体数据和日期建立可信度
+3. 提供多种解决方案而非单一施压
+4. 使用银行内部专业术语增强权威性
+5. 关注客户感受，避免过度施压
+
+请基于以上真实对话模式，以专业催收员的身份进行对话。
 
 客户档案:
 - 客户姓名: ${customerContext.name}
-- 逾期本金: ¥${customerContext.balance.toLocaleString()}
+- 逾期本金: ${this.formatChineseAmount(customerContext.balance)}
 - 逾期天数: ${customerContext.daysOverdue}天
 - 历史联系: ${customerContext.previousContacts || 0}次
 - 风险评级: ${customerContext.riskLevel || '中等'}
 ${conversationHistoryText}
-催收工作要求:
-1. 身份定位: 你是平安银行正式催收员，有合法催收权限
-2. 催收目标: 督促客户尽快还款，减少银行损失
-3. 沟通策略: 先礼后兵，以理服人，依法催收
-4. 专业用语: 使用银行催收标准话术，如"逾期本金"、"还款义务"、"征信记录"等
-5. 施压技巧: 提及征信影响、法律后果，但避免违法威胁
-6. 解决方案: 提供分期还款、最低还款等现实选择
-7. 记录工作: 记录客户态度、还款意愿、承诺时间
-8. 上下文连续性: 基于上述通话记录，避免重复询问已讨论过的内容
 
-催收话术原则:
-- 坚定立场: "您的还款义务是法定的，不能逃避"
-- 征信施压: "继续逾期将严重影响您的个人征信记录"
-- 法律威慑: "我行保留通过法律途径追讨的权利"
-- 解决导向: "我们可以协商制定合理的还款计划"
-- 时限要求: "请您在XX日内联系我们确认还款安排"
+语言要求:
+- 必须使用大陆标准普通话，严禁使用台湾用语
+- 金额表达: 15000元说成"一万五千元"，不是"十五千元"
+- 使用简体中文表达，避免繁体中文用词习惯
+- 语音合成使用大陆口音，不使用台湾腔调
 
-禁止行为:
-- 不得使用威胁恐吓语言
-- 不得泄露客户隐私
-- 不得在不当时间骚扰
-- 不得对第三人催收
-- 不要讨论和催收无关的话题
-
-请基于完整的通话记录，针对客户最新的话语进行专业回应。如果客户说找错人，要核实身份但坚持催收立场。始终保持催收员的专业性和权威性。`;
+请基于完整的通话记录和真实催收对话模式，针对客户最新的话语进行专业回应。`;
 
                 openaiConnection.send(JSON.stringify({
                     type: 'session.update',
@@ -143,7 +181,10 @@ ${conversationHistoryText}
                         input_audio_format: 'pcm16',
                         output_audio_format: 'pcm16',
                         turn_detection: { type: 'server_vad' },
-                        temperature: 0.7
+                        temperature: 0.7,
+                        input_audio_transcription: {
+                            model: 'whisper-1'
+                        }
                     }
                 }));
             }
@@ -152,8 +193,9 @@ ${conversationHistoryText}
         }
     }
 
-    // 清空之前的音频数据
+    // 清空之前的音频数据和文本响应
     audioChunks = [];
+    textResponse = '';
     isProcessing = true;
 
     console.log('📤 发送消息到OpenAI:', message);
@@ -180,11 +222,11 @@ ${conversationHistoryText}
             
             console.log(`✅ TTS API返回音频: ${ttsResponse.data.byteLength} bytes`);
             
-            res.set({
-                'Content-Type': 'audio/wav',
-                'Content-Length': ttsResponse.data.byteLength
+            // 返回包含音频和文本的JSON响应
+            res.json({
+                audio: Array.from(new Uint8Array(ttsResponse.data)),
+                text: message
             });
-            res.send(ttsResponse.data);
             return;
             
         } catch (error) {
@@ -284,13 +326,13 @@ ${conversationHistoryText}
     // 创建WAV文件
     const wavBuffer = createWavBuffer(fullAudio);
     
-    console.log(`✅ 返回音频: ${wavBuffer.length} bytes`);
+    console.log(`✅ 返回音频: ${wavBuffer.length} bytes，文本: "${textResponse}"`);
     
-    res.set({
-        'Content-Type': 'audio/wav',
-        'Content-Length': wavBuffer.length
+    // 返回包含音频和文本的JSON响应
+    res.json({
+        audio: Array.from(wavBuffer),
+        text: textResponse || ''
     });
-    res.send(wavBuffer);
 });
 
 // API端点：音频转文字（使用OpenAI Whisper）
@@ -337,6 +379,166 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     }
 });
 
+// 准确性评估API端点
+app.post('/api/evaluate-accuracy', async (req, res) => {
+    try {
+        const { originalText, spokenText, context } = req.body;
+        
+        if (!originalText || !spokenText) {
+            return res.status(400).json({ error: '缺少必要的文本参数' });
+        }
+        
+        console.log('🔍 评估转录准确性:', { originalText: originalText.substring(0, 50) + '...', spokenText: spokenText.substring(0, 50) + '...' });
+        
+        // 构建评估提示
+        const evaluationPrompt = `你是一个专业的语音转录准确性评估专家。请评估以下语音转录的准确性：
+
+原始文本（AI代理说的）:
+"${originalText}"
+
+转录文本（语音识别结果）:
+"${spokenText}"
+
+对话上下文:
+${context || '银行催收对话场景'}
+
+请从以下几个维度进行评估并给出分数（0-100分）：
+
+1. 词汇准确性 (40%权重) - 关键词是否正确转录
+2. 语义完整性 (30%权重) - 意思是否完整传达
+3. 专业术语准确性 (20%权重) - 银行术语是否正确
+4. 整体可理解性 (10%权重) - 转录结果是否易懂
+
+请返回JSON格式结果：
+{
+  "overall_score": 分数(0-100),
+  "vocabulary_accuracy": 分数(0-100),
+  "semantic_completeness": 分数(0-100), 
+  "terminology_accuracy": 分数(0-100),
+  "comprehensibility": 分数(0-100),
+  "grade": "excellent|good|acceptable|poor",
+  "issues": ["具体问题列表"],
+  "suggestions": "改进建议"
+}
+
+注意：
+- 轻微的语气词差异（如"嗯"、"啊"等）不影响评分
+- 重点关注金额、日期、专业术语的准确性
+- 如果核心信息完整，允许表达方式略有不同`;
+
+        // 调用OpenAI GPT-4o进行评估
+        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model: 'gpt-4o',
+            messages: [
+                {
+                    role: 'system',
+                    content: '你是专业的语音转录准确性评估专家，专门评估中文语音转录质量。'
+                },
+                {
+                    role: 'user', 
+                    content: evaluationPrompt
+                }
+            ],
+            max_tokens: 1000,
+            temperature: 0.1 // 低温度确保评估一致性
+        }, {
+            headers: {
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: 30000
+        });
+
+        const evaluationText = response.data.choices[0].message.content;
+        console.log('📊 GPT-4o评估结果:', evaluationText);
+        
+        // 尝试解析JSON结果
+        let evaluation;
+        try {
+            // 提取JSON部分
+            const jsonMatch = evaluationText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                evaluation = JSON.parse(jsonMatch[0]);
+            } else {
+                throw new Error('未找到JSON格式结果');
+            }
+        } catch (parseError) {
+            console.error('❌ JSON解析失败，使用默认评估:', parseError.message);
+            // 回退到基本相似度评估
+            const similarity = calculateBasicSimilarity(originalText, spokenText);
+            evaluation = {
+                overall_score: similarity,
+                vocabulary_accuracy: similarity,
+                semantic_completeness: similarity,
+                terminology_accuracy: similarity,
+                comprehensibility: similarity,
+                grade: similarity >= 90 ? 'excellent' : similarity >= 75 ? 'good' : similarity >= 60 ? 'acceptable' : 'poor',
+                issues: ['自动评估结果'],
+                suggestions: '建议改进语音识别设置'
+            };
+        }
+        
+        console.log('✅ 准确性评估完成:', evaluation);
+        res.json(evaluation);
+        
+    } catch (error) {
+        console.error('❌ 准确性评估失败:', error.message);
+        if (error.response) {
+            console.error('OpenAI API错误:', error.response.status, error.response.data);
+        }
+        
+        res.status(500).json({ 
+            error: '准确性评估失败',
+            details: error.message 
+        });
+    }
+});
+
+// 基本文本相似度计算（回退方案）
+function calculateBasicSimilarity(text1, text2) {
+    if (!text1 || !text2) return 0;
+    
+    // 简单的字符级相似度计算
+    const longer = text1.length > text2.length ? text1 : text2;
+    const shorter = text1.length > text2.length ? text2 : text1;
+    
+    if (longer.length === 0) return 100;
+    
+    const editDistance = levenshteinDistance(longer, shorter);
+    const similarity = (longer.length - editDistance) / longer.length;
+    
+    return Math.round(similarity * 100);
+}
+
+// 编辑距离算法
+function levenshteinDistance(str1, str2) {
+    const matrix = [];
+    
+    for (let i = 0; i <= str2.length; i++) {
+        matrix[i] = [i];
+    }
+    
+    for (let j = 0; j <= str1.length; j++) {
+        matrix[0][j] = j;
+    }
+    
+    for (let i = 1; i <= str2.length; i++) {
+        for (let j = 1; j <= str1.length; j++) {
+            if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+                matrix[i][j] = matrix[i - 1][j - 1];
+            } else {
+                matrix[i][j] = Math.min(
+                    matrix[i - 1][j - 1] + 1,
+                    matrix[i][j - 1] + 1,
+                    matrix[i - 1][j] + 1
+                );
+            }
+        }
+    }
+    
+    return matrix[str2.length][str1.length];
+}
+
 // 创建WAV文件格式
 function createWavBuffer(pcmData) {
     const sampleRate = 24000;
@@ -368,10 +570,24 @@ app.listen(3002, async () => {
     console.log('🚀 HTTP服务器启动成功！');
     console.log('📱 前端访问: http://localhost:3002');
     
-    // 预先连接到OpenAI
+    // 预先建立并维持OpenAI连接
     try {
         await connectToOpenAI();
         console.log('🔑 OpenAI连接已建立，准备就绪');
+        
+        // 设置连接监控，断开时自动重连
+        setInterval(async () => {
+            if (!openaiConnection || openaiConnection.readyState !== WebSocket.OPEN) {
+                console.log('🔄 检测到连接断开，正在重连...');
+                try {
+                    await connectToOpenAI();
+                    console.log('✅ OpenAI连接已恢复');
+                } catch (error) {
+                    console.error('❌ 重连失败，2秒后重试');
+                }
+            }
+        }, 2000); // 每2秒检查一次连接状态
+        
     } catch (error) {
         console.error('⚠️  OpenAI初始连接失败，将在请求时重试');
     }
