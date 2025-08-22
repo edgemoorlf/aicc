@@ -12,6 +12,7 @@ class AICollectionAgent {
         this.currentCustomer = null;
         this.currentScenario = 'overdue_payment';
         this.conversationHistory = [];
+        this.customerHasResponded = false; // 新增：标记客户是否已回应
         this.metrics = {
             latency: [],
             accuracy: [],
@@ -303,6 +304,7 @@ class AICollectionAgent {
             // 确保监听状态重置
             this.isListening = false;
             this.isRecording = false;
+            this.customerHasResponded = false; // 重置客户回应状态
             
             // 设置会话 (无需连接延迟，服务器保持持久连接)
             this.setupSession();
@@ -372,10 +374,10 @@ class AICollectionAgent {
         try {
             this.debugLog('正在启动持续监听...');
             
-            // 获取麦克风权限
+            // 获取麦克风权限 - 配置为8kHz以匹配DashScope 8k模型
             this.audioStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
-                    sampleRate: 16000,
+                    sampleRate: 8000,  // 改为8kHz匹配paraformer-realtime-8k-v2
                     channelCount: 1,
                     echoCancellation: true,
                     noiseSuppression: true,
@@ -526,7 +528,7 @@ class AICollectionAgent {
             if (!this.audioStream) {
                 this.audioStream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
-                        sampleRate: 16000,
+                        sampleRate: 8000,  // 改为8kHz匹配paraformer-realtime-8k-v2
                         channelCount: 1,
                         echoCancellation: true,
                         noiseSuppression: true
@@ -575,6 +577,9 @@ class AICollectionAgent {
         this.isRecording = false;
         this.mediaRecorder.stop();
         
+        // 记录客户停止说话的时间点
+        this.customerStopTime = Date.now();
+        
         // 在持续监听模式下不关闭音频流
         if (!this.isListening && this.audioStream) {
             this.audioStream.getTracks().forEach(track => track.stop());
@@ -606,6 +611,12 @@ class AICollectionAgent {
         try {
             // 合并音频数据
             const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm;codecs=opus' });
+            
+            // 停止任何当前播放的音频
+            this.stopCurrentAudio();
+            
+            // 标记客户开始回应
+            this.customerHasResponded = true;
             
             // 使用Speech Recognition API进行语音识别
             const transcript = await this.recognizeSpeech(audioBlob);
@@ -649,39 +660,76 @@ class AICollectionAgent {
                 greetingAudio.play().catch(reject);
             });
             
-            // 显示并播放个性化初始问候文本
-            const initialMessage = `您好${customer.name}，我是平安银行催收专员。请问您现在有时间讨论一下还款安排吗？`;
-            this.displayMessage('assistant', initialMessage);
-
-            const response = await fetch(`${this.serverUrl}/api/chat`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    message: initialMessage,
-                    messageType: 'agent_greeting'
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            // 等待2秒看客户是否回应
+            this.debugLog('等待客户回应...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // 如果客户在2秒内没有回应，继续说话
+            if (!this.customerHasResponded) {
+                this.debugLog('客户未回应，继续问候流程');
+                await this.continueGreetingSequence(customer);
             }
-            
-            const responseData = await response.json();
-            
-            // 播放个性化问候音频 (会自动停止之前的音频)
-            if (responseData.audio) {
-                const audioBlob = new Blob([new Uint8Array(responseData.audio)], { type: 'audio/wav' });
-                await this.playAudioResponse(audioBlob);
-            }
-            
-            this.debugLog('初始问候完成，等待客户回复');
             
         } catch (error) {
             console.error('播放初始问候失败:', error);
             this.debugLog('初始问候失败: ' + error.message);
             this.isPlayingAudio = false;
+        }
+    }
+
+    async continueGreetingSequence(customer) {
+        try {
+            // 分段问候信息，每段不超过4句话
+            const greetingSegments = [
+                `${customer.name}您好，我是平安银行催收专员，工号888888。`,
+                `根据我行记录，您有一笔${this.formatChineseAmount(customer.balance)}的逾期本金，逾期了${customer.daysOverdue}天，已上报征信系统。`,
+                `请问您现在方便谈论还款安排吗？`
+            ];
+            
+            for (let i = 0; i < greetingSegments.length; i++) {
+                // 如果客户在此期间开始说话，停止问候序列
+                if (this.customerHasResponded) {
+                    this.debugLog('客户开始回应，停止问候序列');
+                    break;
+                }
+                
+                const segment = greetingSegments[i];
+                this.debugLog(`播放问候片段 ${i + 1}: ${segment}`);
+                
+                // 显示文本
+                this.displayMessage('assistant', segment);
+                
+                // 生成并播放音频
+                const response = await fetch(`${this.serverUrl}/api/chat`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: segment,
+                        messageType: 'agent_greeting'
+                    })
+                });
+
+                if (response.ok) {
+                    const responseData = await response.json();
+                    if (responseData.audio) {
+                        const audioBlob = new Blob([new Uint8Array(responseData.audio)], { type: 'audio/wav' });
+                        await this.playAudioResponse(audioBlob);
+                    }
+                }
+                
+                // 在片段之间等待2秒，检查客户是否回应
+                if (i < greetingSegments.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+            }
+            
+            this.debugLog('问候序列完成，等待客户回复');
+            
+        } catch (error) {
+            console.error('问候序列播放失败:', error);
+            this.debugLog('问候序列失败: ' + error.message);
         }
     }
 
@@ -777,7 +825,8 @@ class AICollectionAgent {
 
     async sendMessageToAI(message) {
         try {
-            const startTime = Date.now();
+            // 获取响应的处理开始时间（仅用于服务器处理时间测量）
+            const serverStartTime = Date.now();
             
             // Build the full contextual message with conversation history and rules
             const contextualMessage = this.buildContextualMessage(message);
@@ -807,7 +856,7 @@ class AICollectionAgent {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
 
-            const responseTime = Date.now() - startTime;
+            const serverProcessTime = Date.now() - serverStartTime;
             
             // Display the customer message first
             this.displayMessage('user', message);
@@ -815,10 +864,17 @@ class AICollectionAgent {
             // 获取响应 (包含音频和文本)
             const responseData = await response.json();
             
-            // 播放音频
+            // 播放音频并计算真实的响应延迟
             if (responseData.audio) {
                 const audioBlob = new Blob([new Uint8Array(responseData.audio)], { type: 'audio/wav' });
                 await this.playAudioResponse(audioBlob);
+                
+                // 计算真实的响应延迟：从客户停止说话到代理开始说话
+                if (this.customerStopTime && this.agentStartTime) {
+                    const realLatency = this.agentStartTime - this.customerStopTime;
+                    this.updateLatencyMetrics(realLatency);
+                    this.debugLog(`真实响应延迟: ${realLatency}ms (服务器处理: ${serverProcessTime}ms)`);
+                }
             }
             
             // 显示AI的文本回复
@@ -828,16 +884,13 @@ class AICollectionAgent {
                 this.displayMessage('assistant', '[语音回复]');
             }
             
-            // 更新指标
-            this.updateLatencyMetrics(responseTime);
+            // 更新会话统计
             this.updateSessionStats();
             
             // 评估转录准确性（如果有AI回复文本）
             if (responseData.text && message) {
                 this.evaluateTranscriptAccuracy(responseData.text, message);
             }
-            
-            this.debugLog(`AI回复完成，耗时: ${responseTime}ms`);
             
         } catch (error) {
             console.error('发送消息失败:', error);
@@ -909,6 +962,7 @@ ${conversationHistoryText}
 3. 提供多种解决方案
 4. 关注客户感受和实际困难
 5. 使用银行专业术语增强权威性
+6. 每一次回答尽量简练，不要超过4句话，最好在1-2句，避免长篇大论，确保客户能听懂
 
 其它注意语言事项:
 - 使用大陆标准普通话，避免使用台湾或香港的用语，及台湾国语
@@ -947,6 +1001,9 @@ ${conversationHistoryText}
                 };
                 
                 audio.onerror = (error) => {
+                    console.error('音频播放错误详情:', error);
+                    console.error('音频数据大小:', audioBlob.size, 'bytes');
+                    console.error('音频类型:', audioBlob.type);
                     URL.revokeObjectURL(audioUrl);
                     this.currentAudio = null;
                     this.isPlayingAudio = false;
@@ -961,6 +1018,12 @@ ${conversationHistoryText}
                         this.isPlayingAudio = false;
                         resolve();
                     }
+                };
+                
+                // 记录代理开始说话的时间点
+                audio.onplay = () => {
+                    this.agentStartTime = Date.now();
+                    this.debugLog('代理开始播放音频');
                 };
                 
                 audio.play().catch(reject);
