@@ -213,3 +213,4 @@ test*
 *.md
 *.backup
 data/
+.vscode/
