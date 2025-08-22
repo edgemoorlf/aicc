@@ -19,8 +19,8 @@ class AICollectionAgent {
             turnCount: 0
         };
         
-        // HTTP服务器地址
-        this.serverUrl = 'http://localhost:3002';
+        // HTTP服务器地址 - 根据环境自动检测
+        this.serverUrl = this.getServerUrl();
         
         // Audio相关
         this.audioContext = null;
@@ -34,6 +34,26 @@ class AICollectionAgent {
         
         // 初始化
         this.init();
+    }
+
+    getServerUrl() {
+        // 检查是否有环境变量配置（通过全局变量或window对象）
+        if (typeof window !== 'undefined' && window.SERVER_URL) {
+            return window.SERVER_URL;
+        }
+        
+        // 检查是否在开发环境
+        const isDevelopment = location.hostname === 'localhost' || 
+                             location.hostname === '127.0.0.1' || 
+                             location.hostname.includes('.local');
+        
+        if (isDevelopment) {
+            // 开发环境：使用当前主机的3002端口
+            return `${location.protocol}//${location.hostname}:3002`;
+        } else {
+            // 生产环境：使用相对路径或当前域名
+            return location.origin;
+        }
     }
 
     async init() {
@@ -182,9 +202,14 @@ class AICollectionAgent {
         //     this.stopRecording();
         // });
 
-        // 指标面板切换
+        // 指标面板切换（内部切换）
         document.getElementById('toggle-metrics').addEventListener('click', () => {
             this.toggleMetrics();
+        });
+
+        // 指标监控切换（显示/隐藏整个面板）
+        document.getElementById('metrics-toggle').addEventListener('click', () => {
+            this.toggleMetricsDashboard();
         });
 
         // 调试面板
@@ -275,6 +300,10 @@ class AICollectionAgent {
         }
 
         try {
+            // 确保监听状态重置
+            this.isListening = false;
+            this.isRecording = false;
+            
             // 设置会话 (无需连接延迟，服务器保持持久连接)
             this.setupSession();
             this.sessionActive = true;
@@ -335,16 +364,28 @@ class AICollectionAgent {
 
     // 新增方法：开始持续监听
     async startContinuousListening() {
-        if (this.isListening) return;
+        if (this.isListening) {
+            this.debugLog('监听已在运行，跳过重复启动');
+            return;
+        }
 
         try {
+            this.debugLog('正在启动持续监听...');
+            
             // 获取麦克风权限
             this.audioStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
                     sampleRate: 16000,
                     channelCount: 1,
                     echoCancellation: true,
-                    noiseSuppression: true
+                    noiseSuppression: true,
+                    autoGainControl: true, // 自动增益控制
+                    googEchoCancellation: true,
+                    googAutoGainControl: true,
+                    googNoiseSuppression: true,
+                    googHighpassFilter: true, // 高通滤波器，过滤低频噪音
+                    googTypingNoiseDetection: true, // 键盘噪音检测
+                    googAudioMirroring: false
                 } 
             });
 
@@ -362,27 +403,33 @@ class AICollectionAgent {
             // 开始语音活动检测
             this.startVoiceActivityDetection();
             
-            this.debugLog('持续监听已开启');
+            this.debugLog('持续监听已开启，状态: ' + this.isListening);
 
         } catch (error) {
             console.error('开始持续监听失败:', error);
             this.debugLog('错误: 持续监听失败 - ' + error.message);
+            this.isListening = false; // 确保失败时状态正确
             alert('无法开启麦克风，请确保已授权麦克风权限');
         }
     }
 
     // 新增方法：停止持续监听
     stopContinuousListening() {
-        if (!this.isListening) return;
+        if (!this.isListening) {
+            this.debugLog('监听未在运行，跳过停止操作');
+            return;
+        }
 
+        this.debugLog('正在停止持续监听...');
         this.isListening = false;
         
         if (this.audioStream) {
             this.audioStream.getTracks().forEach(track => track.stop());
+            this.audioStream = null;
         }
         
         this.updateListeningUI(false);
-        this.debugLog('持续监听已关闭');
+        this.debugLog('持续监听已关闭，状态: ' + this.isListening);
     }
 
     // 新增方法：语音活动检测
@@ -390,6 +437,7 @@ class AICollectionAgent {
         const bufferLength = this.analyser.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
         let speechDetected = false;
+        let speechStartTime = null;
         let silenceStart = null;
 
         const detectVoice = () => {
@@ -399,12 +447,13 @@ class AICollectionAgent {
             
             // 计算音频能量
             const average = dataArray.reduce((sum, value) => sum + value, 0) / bufferLength;
-            const threshold = 30; // 语音检测阈值，可调整
+            const threshold = 60; // 提高语音检测阈值，避免背景噪音 (原来是30)
             
             if (average > threshold) {
                 // 检测到语音
                 if (!speechDetected) {
                     speechDetected = true;
+                    speechStartTime = Date.now();
                     silenceStart = null;
                     
                     // 如果代理正在说话，立即停止
@@ -422,12 +471,29 @@ class AICollectionAgent {
                     silenceStart = Date.now();
                 }
                 
-                // 静音超过1.5秒，停止录音
-                if (speechDetected && silenceStart && Date.now() - silenceStart > 1500) {
-                    speechDetected = false;
-                    silenceStart = null;
-                    this.stopRecording();
-                    this.debugLog('检测到静音，停止录音');
+                // 静音超过2秒，停止录音（增加到2秒避免过早停止）
+                if (speechDetected && silenceStart && Date.now() - silenceStart > 2000) {
+                    const speechDuration = Date.now() - speechStartTime;
+                    
+                    // 只处理超过800ms的语音（过滤掉很短的噪音）
+                    if (speechDuration >= 800) {
+                        speechDetected = false;
+                        silenceStart = null;
+                        speechStartTime = null;
+                        this.stopRecording();
+                        this.debugLog(`检测到静音，语音持续${speechDuration}ms，停止录音`);
+                    } else {
+                        // 语音太短，忽略
+                        speechDetected = false;
+                        silenceStart = null;
+                        speechStartTime = null;
+                        this.debugLog(`语音过短(${speechDuration}ms)，忽略录音`);
+                        if (this.isRecording) {
+                            this.mediaRecorder.stop();
+                            this.isRecording = false;
+                            this.audioChunks = []; // 清空音频数据
+                        }
+                    }
                 }
             }
             
@@ -638,7 +704,15 @@ class AICollectionAgent {
             }
             
             const result = await response.json();
-            return result.transcript || null;
+            const transcript = result.transcript;
+            
+            // 过滤无关内容
+            if (transcript && this.isValidTranscript(transcript)) {
+                return transcript;
+            } else {
+                this.debugLog(`转录内容被过滤: "${transcript}"`);
+                return null;
+            }
             
         } catch (error) {
             console.error('语音识别失败:', error);
@@ -647,6 +721,47 @@ class AICollectionAgent {
             // Fallback to text input if ASR fails
             return this.showTextInput();
         }
+    }
+
+    // 新增方法：验证转录内容是否有效
+    isValidTranscript(transcript) {
+        if (!transcript || transcript.trim().length < 2) {
+            return false;
+        }
+        
+        // 过滤明显无关的内容
+        const irrelevantPatterns = [
+            /字幕由.*提供/,
+            /谢谢观看/,
+            /下集再见/,
+            /请不吝点赞/,
+            /订阅.*转发/,
+            /打赏支持/,
+            /明镜.*点点栏目/,
+            /amara\.org/i,
+            /subtitle/i,
+            /^[。，、！？\s]*$/, // 只有标点符号
+            /^[a-zA-Z\s]*$/, // 只有英文字母
+            /^\d+[\s\d]*$/, // 只有数字
+            /音乐/,
+            /背景音/,
+            /\[.*\]/, // 括号内容（通常是描述音效等）
+            /（.*）/, // 中文括号内容
+        ];
+        
+        for (const pattern of irrelevantPatterns) {
+            if (pattern.test(transcript)) {
+                return false;
+            }
+        }
+        
+        // 检查是否包含中文字符（催收对话应该主要是中文）
+        const hasChinese = /[\u4e00-\u9fff]/.test(transcript);
+        if (!hasChinese && transcript.length > 10) {
+            return false; // 长文本没有中文字符，可能是无关内容
+        }
+        
+        return true;
     }
 
     showTextInput() {
@@ -1106,6 +1221,19 @@ ${conversationHistoryText}
         }
     }
 
+    toggleMetricsDashboard() {
+        const dashboard = document.getElementById('metrics-dashboard');
+        const btn = document.getElementById('metrics-toggle');
+        
+        if (dashboard.style.display === 'none') {
+            dashboard.style.display = 'block';
+            btn.textContent = '隐藏指标';
+        } else {
+            dashboard.style.display = 'none';
+            btn.textContent = '指标监控';
+        }
+    }
+
     toggleDebug() {
         const console = document.getElementById('debug-console');
         const btn = document.getElementById('toggle-debug');
@@ -1151,11 +1279,14 @@ ${conversationHistoryText}
     }
 
     resetSession() {
+        this.debugLog('正在重置会话...');
         this.endSession();
         
         // 重置数据
         this.conversationHistory = [];
         this.sessionActive = false;
+        this.isListening = false;
+        this.isRecording = false;
         this.metrics = {
             latency: [],
             accuracy: [],

@@ -16,6 +16,8 @@
 
         <!-- Demo Controls -->
         <section class="demo-controls">
+            <button id="session-toggle" class="btn btn-primary btn-main">开始对话</button>
+            
             <div class="control-group">
                 <label for="customer-select">客户:</label>
                 <select id="customer-select">
@@ -33,10 +35,10 @@
                 </select>
             </div>
 
-            <button id="session-toggle" class="btn btn-primary">开始对话</button>
             <button id="record-btn" class="btn btn-success" disabled>
                 <span class="record-text">开始监听</span>
             </button>
+            <button id="metrics-toggle" class="btn btn-info">指标监控</button>
             <button id="reset-session" class="btn btn-tertiary">重置</button>
             <button id="test-btn" class="btn btn-success">测试音频</button>
         </section>
@@ -92,7 +94,7 @@
             </section>
 
             <!-- Metrics Dashboard -->
-            <section class="metrics-dashboard">
+            <section class="metrics-dashboard" id="metrics-dashboard" style="display: none;">
                 <div class="dashboard-header">
                     <h3>性能指标</h3>
                     <button id="toggle-metrics" class="btn btn-small">展开</button>
@@ -173,6 +175,7 @@
     </div>
 
     <!-- Scripts -->
+    <script src="config.js"></script>
     <script src="http-client.js"></script>
 </body>
 </html>

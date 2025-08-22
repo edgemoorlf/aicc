@@ -350,9 +350,10 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
             filename: 'audio.webm',
             contentType: req.file.mimetype
         });
-        formData.append('model', 'whisper-1');
+        formData.append('model', 'whisper-1');        
         formData.append('language', 'zh');
         formData.append('response_format', 'json');
+        formData.append('prompt', '这是一段普通话对话的转写，请确保使用简体中文转写。');
         
         const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
             headers: {
