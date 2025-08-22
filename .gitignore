@@ -209,7 +209,7 @@ __marimo__/
 node_modules/
 playwright-report/
 test-results/
-test*
+tests/
 *.md
 *.backup
 data/

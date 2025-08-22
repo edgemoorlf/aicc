@@ -5,6 +5,7 @@ import os
 import json
 import base64
 import time
+import requests
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import dashscope
@@ -231,7 +232,13 @@ def generate_ai_response(system_prompt):
         
         if response.status_code == 200:
             ai_text = response.output.choices[0].message.content
-            return ai_text.strip()
+            # 移除可能的"催收员："前缀
+            ai_text = ai_text.strip()
+            if ai_text.startswith('催收员：'):
+                ai_text = ai_text[4:].strip()  # 移除"催收员："前缀
+            elif ai_text.startswith('催收员:'):
+                ai_text = ai_text[3:].strip()  # 移除"催收员:"前缀（英文冒号）
+            return ai_text
         else:
             logger.error(f'通义千问API调用失败: {response.status_code}')
             return None
@@ -241,42 +248,84 @@ def generate_ai_response(system_prompt):
         return None
 
 def generate_tts_audio(text):
-    """使用通义千问TTS生成语音"""
-    try:
-        logger.info(f'生成TTS音频: {text[:30]}...')
-        
-        # 使用streaming方式，类似工作示例
-        responses = dashscope.audio.qwen_tts.SpeechSynthesizer.call(
-            model="qwen-tts",
-            api_key=DASHSCOPE_API_KEY,  # 显式传递API key
-            text=text,
-            voice="Cherry",  # 中文女声 - 使用支持的声音
-            stream=True  # 使用流式处理
-        )
-        
-        # 收集所有音频数据块
-        pcm_data = b''
-        for chunk in responses:
-            if "output" in chunk and "audio" in chunk["output"] and "data" in chunk["output"]["audio"]:
-                audio_string = chunk["output"]["audio"]["data"]
-                wav_bytes = base64.b64decode(audio_string)
-                pcm_data += wav_bytes
-        
-        if pcm_data:
-            logger.info(f'PCM数据长度: {len(pcm_data)} bytes')
+    """使用通义千问TTS生成语音，带重试机制"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            logger.info(f'生成TTS音频 (尝试 {attempt + 1}/{max_retries}): {text[:30]}...')
             
-            # 将PCM数据转换为WAV格式
-            wav_data = create_wav_buffer(pcm_data)
-            logger.info(f'WAV数据长度: {len(wav_data)} bytes')
+            # 使用非流式方式，直接生成完整的WAV格式
+            response = dashscope.audio.qwen_tts.SpeechSynthesizer.call(
+                model="qwen-tts",
+                api_key=DASHSCOPE_API_KEY,  # 显式传递API key
+                text=text,
+                voice="Cherry",  # 中文女声 - 使用支持的声音
+                format='wav',  # WAV格式
+                stream=False  # 非流式处理，获得完整WAV文件
+            )
             
-            return list(wav_data)
-        else:
-            logger.error('TTS响应中没有音频数据')
-            return []
+            # 检查response是否为None
+            if response is None:
+                raise ValueError("TTS API返回None响应")
             
-    except Exception as e:
-        logger.error(f'TTS生成错误: {str(e)}')
-        return []
+            # 检查响应状态
+            if hasattr(response, 'status_code') and response.status_code == 200:
+                if hasattr(response, 'output') and response.output and hasattr(response.output, 'audio'):
+                    audio_data = response.output.audio
+                    logger.info(f'音频数据类型: {type(audio_data)}')
+                    
+                    wav_data = None
+                    if isinstance(audio_data, str):
+                        # Base64编码的音频数据
+                        wav_data = base64.b64decode(audio_data)
+                        logger.info(f'从字符串解码WAV数据: {len(wav_data)} bytes')
+                    elif hasattr(audio_data, 'data'):
+                        # 音频数据在data字段中
+                        wav_data = base64.b64decode(audio_data.data)
+                        logger.info(f'从data字段解码WAV数据: {len(wav_data)} bytes')
+                    elif isinstance(audio_data, dict):
+                        # 字典格式，优先检查URL字段
+                        if 'url' in audio_data and audio_data['url']:
+                            # 从URL下载音频
+                            import requests
+                            logger.info(f'从URL下载音频: {audio_data["url"]}')
+                            try:
+                                audio_response = requests.get(audio_data['url'])
+                                if audio_response.status_code == 200:
+                                    wav_data = audio_response.content
+                                    logger.info(f'从URL下载WAV数据: {len(wav_data)} bytes')
+                                else:
+                                    raise ValueError(f"URL下载失败，状态码: {audio_response.status_code}")
+                            except Exception as e:
+                                raise ValueError(f"URL下载异常: {str(e)}")
+                        elif 'data' in audio_data and audio_data['data']:
+                            # 从data字段获取base64数据
+                            wav_data = base64.b64decode(audio_data['data'])
+                            logger.info(f'从字典data字段解码WAV数据: {len(wav_data)} bytes')
+                        else:
+                            raise ValueError(f"字典中没有有效的url或data字段: {list(audio_data.keys())}")
+                    else:
+                        raise ValueError(f"音频数据格式异常: {type(audio_data)}")
+                    
+                    if wav_data:
+                        logger.info(f'TTS音频生成成功 (尝试 {attempt + 1}): WAV数据长度 {len(wav_data)} bytes')
+                        return list(wav_data)
+                    else:
+                        raise ValueError("无法解码音频数据")
+                else:
+                    raise ValueError(f"响应中没有音频数据: {response.output}")
+            else:
+                raise ValueError(f"TTS API调用失败，状态码: {getattr(response, 'status_code', '未知')}")
+                
+        except Exception as e:
+            logger.error(f'TTS生成失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}')
+            if attempt == max_retries - 1:
+                logger.error('TTS重试次数已用完，生成失败')
+                return []
+            else:
+                logger.info(f'等待1秒后重试...')
+                import time
+                time.sleep(1)
 
 def create_wav_buffer(pcm_data):
     """将PCM16数据转换为WAV格式"""
@@ -323,63 +372,82 @@ def recognize_speech_dashscope(audio_file):
         audio_content = audio_file.read()
         logger.info(f'音频文件大小: {len(audio_content)} bytes')
         
-        # 将WebM文件转换为WAV格式
+        # 直接使用WebM格式进行ASR
         import tempfile
-        from pydub import AudioSegment
         
         # 保存原始WebM文件
         with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as webm_file:
             webm_file.write(audio_content)
             webm_file_path = webm_file.name
         
-        # 转换为WAV文件
-        wav_file_path = webm_file_path.replace('.webm', '.wav')
+        logger.info(f'WebM文件大小: {len(audio_content)} bytes location: {webm_file_path}')
         
         try:
-            # 使用pydub将WebM转换为WAV
-            logger.info('转换WebM到WAV格式...')
+            logger.info('使用8kHz WebM直接识别...')
+            
+            # 直接使用8k模型处理8kHz WebM
+            recognition = Recognition(
+                model='paraformer-realtime-8k-v2',
+                format='webm',
+                sample_rate=8000,  # 客户端现在生成8kHz WebM
+                callback=None
+            )
+            
+            result = recognition.call(webm_file_path)
+            logger.info(f'8kHz WebM识别完成，状态: {getattr(result, "status_code", "未知")}')
+            
+            # 检查8kHz WebM识别是否成功
+            if hasattr(result, 'get_sentence') and result.get_sentence():
+                sentences = result.get_sentence()
+                logger.info(f'8kHz WebM识别成功，识别到 {len(sentences)} 个句子')
+                
+                transcript_parts = []
+                for sentence_obj in sentences:
+                    if isinstance(sentence_obj, dict) and 'text' in sentence_obj:
+                        transcript_parts.append(sentence_obj['text'])
+                
+                transcript = ''.join(transcript_parts)
+                if transcript.strip():
+                    logger.info(f'8kHz WebM识别结果: {transcript}')
+                    return transcript.strip()
+            
+            elif hasattr(result, 'output') and result.output and hasattr(result.output, 'sentence') and result.output.sentence:
+                sentences = result.output.sentence
+                transcript_parts = []
+                for sentence_obj in sentences:
+                    if isinstance(sentence_obj, dict) and 'text' in sentence_obj:
+                        transcript_parts.append(sentence_obj['text'])
+                
+                transcript = ''.join(transcript_parts)
+                if transcript.strip():
+                    logger.info(f'8kHz WebM识别结果: {transcript}')
+                    return transcript.strip()
+            
+            logger.warning('8kHz WebM识别失败，回退到WAV转换')
+            
+        except Exception as webm_error:
+            logger.warning(f'8kHz WebM识别异常，回退到WAV转换: {str(webm_error)}')
+        
+        # 回退方案：转换为WAV
+        try:
+            logger.info('使用WebM转WAV + 8kHz模型进行ASR...')
+            
+            # 转换WebM到8kHz WAV
+            from pydub import AudioSegment
+            wav_file_path = webm_file_path.replace('.webm', '_8khz.wav')
+            
             audio = AudioSegment.from_file(webm_file_path, format="webm")
-            
-            # 检查音频属性
-            duration_ms = len(audio)
-            duration_sec = duration_ms / 1000.0
-            logger.info(f'原始音频时长: {duration_sec:.2f}秒 ({duration_ms}ms)')
-            logger.info(f'原始音频采样率: {audio.frame_rate}Hz, 声道数: {audio.channels}')
-            
-            # 检查音频是否太短
-            if duration_sec < 0.5:
-                logger.warning(f'音频过短({duration_sec:.2f}秒)，可能无法识别')
-            elif duration_sec > 60:
-                logger.warning(f'音频过长({duration_sec:.2f}秒)，可能超出限制')
-            
-            # 转换为16kHz单声道WAV（DashScope要求的格式）
-            audio = audio.set_frame_rate(16000).set_channels(1)
-            # 确保是16位PCM格式
-            audio = audio.set_sample_width(2)  # 2字节 = 16位
+            audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
             audio.export(wav_file_path, format="wav")
             
-            logger.info(f'音频转换完成: {wav_file_path}')
-            logger.info(f'转换后音频时长: {len(audio)/1000.0:.2f}秒')
+            logger.info(f'WAV转换完成: {wav_file_path}')
             
-            # 验证WAV文件是否存在并有内容
-            if not os.path.exists(wav_file_path):
-                logger.error(f'WAV文件不存在: {wav_file_path}')
-                return None
-                
-            wav_size = os.path.getsize(wav_file_path)
-            logger.info(f'WAV文件大小: {wav_size} bytes')
-            
-            if wav_size == 0:
-                logger.error('WAV文件为空')
-                return None
-            
-            # 使用DashScope ASR API识别WAV文件
-            logger.info('开始调用DashScope ASR...')
+            # 使用8kHz模型进行识别
             recognition = Recognition(
-                model='paraformer-realtime-v2',
+                model='paraformer-realtime-8k-v2',
                 format='wav',
-                sample_rate=16000,
-                callback=None  # 同步调用
+                sample_rate=8000,
+                callback=None
             )
             
             # 进行语音识别
@@ -428,27 +496,21 @@ def recognize_speech_dashscope(audio_file):
             return None
             
         except Exception as e:
-            logger.error(f'音频转换或识别错误: {str(e)}')
+            logger.error(f'WebM语音识别错误: {str(e)}')
             import traceback
             logger.error(f'错误详情: {traceback.format_exc()}')
             return None
             
         finally:
-            # 清理临时文件 - 保留WAV文件用于调试
+            # 清理临时WebM文件
             import time
             time.sleep(1)  # 给文件系统一点时间
-            try:
-                if os.path.exists(webm_file_path):
-                    os.unlink(webm_file_path)
-                    logger.info(f'清理WebM文件: {webm_file_path}')
-                # 注释掉WAV文件清理，用于调试
-                # if os.path.exists(wav_file_path):
-                #     os.unlink(wav_file_path)
-                #     logger.info(f'清理WAV文件: {wav_file_path}')
-                if os.path.exists(wav_file_path):
-                    logger.info(f'保留WAV文件用于调试: {wav_file_path}')
-            except Exception as cleanup_error:
-                logger.error(f'清理文件失败: {cleanup_error}')
+            # try:
+            #     if os.path.exists(webm_file_path):
+            #         os.unlink(webm_file_path)
+            #         logger.info(f'清理WebM文件: {webm_file_path}')
+            # except Exception as cleanup_error:
+            #     logger.error(f'清理文件失败: {cleanup_error}')
                 
     except Exception as e:
         logger.error(f'DashScope语音识别错误: {str(e)}')
