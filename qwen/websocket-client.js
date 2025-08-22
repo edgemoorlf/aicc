@@ -1,26 +1,32 @@
 /**
- * AI催收助手 - HTTP版本客户端
- * 使用HTTP请求替代WebSocket连接，解决代理服务器问题
+ * AI催收助手 - WebSocket版本客户端
+ * 支持流式音频分段传输，基于http-client.js完整功能
  */
 
-class AICollectionAgent {
+class AICollectionAgentWS {
     constructor() {
         this.isConnected = false;
         this.isRecording = false;
-        this.isListening = false; // 新增：标记是否处于持续监听状态
-        this.sessionActive = false; // 新增：标记会话是否活跃
+        this.isListening = false;
+        this.sessionActive = false;
         this.currentCustomer = null;
         this.currentScenario = 'overdue_payment';
         this.conversationHistory = [];
-        this.customerHasResponded = false; // 新增：标记客户是否已回应
+        this.customerHasResponded = false;
         this.metrics = {
             latency: [],
             accuracy: [],
             sessionStart: null,
-            turnCount: 0
+            turnCount: 0,
+            // 详细延迟指标
+            asrLatency: [],
+            llmLatency: [],
+            ttsLatency: [],
+            endToEndLatency: []
         };
         
-        // HTTP服务器地址 - 根据环境自动检测
+        // WebSocket相关
+        this.socket = null;
         this.serverUrl = this.getServerUrl();
         
         // Audio相关
@@ -28,10 +34,20 @@ class AICollectionAgent {
         this.mediaRecorder = null;
         this.audioStream = null;
         this.audioChunks = [];
-        this.analyser = null; // 新增：用于语音活动检测
-        this.silenceTimeout = null; // 新增：静音计时器
-        this.currentAudio = null; // 新增：当前播放的音频对象
-        this.isPlayingAudio = false; // 新增：标记是否正在播放音频
+        this.analyser = null;
+        this.silenceTimeout = null;
+        this.currentAudio = null;
+        this.isPlayingAudio = false;
+        this.audioQueue = [];
+        
+        // 流式PCM播放相关
+        this.pcmAudioQueue = [];
+        this.pcmIsPlaying = false;
+        this.pcmGainNode = null;
+        this.pcmNextStartTime = 0;
+        this.pcmChunkBuffer = new Map(); // 缓存乱序到达的PCM块
+        this.expectedChunkIndex = 1; // 期望的下一个块索引
+        this.currentSegmentIndex = -1; // 当前段落索引
         
         // 延迟图表相关
         this.latencyChart = null;
@@ -43,7 +59,7 @@ class AICollectionAgent {
     }
 
     getServerUrl() {
-        // 检查是否有环境变量配置（通过全局变量或window对象）
+        // 检查是否有环境变量配置
         if (typeof window !== 'undefined' && window.SERVER_URL) {
             return window.SERVER_URL;
         }
@@ -54,16 +70,14 @@ class AICollectionAgent {
                              location.hostname.includes('.local');
         
         if (isDevelopment) {
-            // 开发环境：使用当前主机的3002端口
-            return `${location.protocol}//${location.hostname}:3002`;
+            return `http://${location.hostname}:3003`;
         } else {
-            // 生产环境：使用相对路径或当前域名
             return location.origin;
         }
     }
 
     async init() {
-        console.log('初始化AI催收助手 (HTTP版本)...');
+        console.log('初始化AI催收助手 (WebSocket版本)...');
         
         // 初始化UI状态
         this.initializeUIState();
@@ -77,11 +91,11 @@ class AICollectionAgent {
         // 初始化音频上下文
         this.initAudioContext();
         
-        // 检查服务器连接
-        await this.checkServerConnection();
+        // 建立WebSocket连接
+        await this.connectWebSocket();
         
         console.log('AI催收助手初始化完成');
-        this.debugLog('系统初始化完成 (HTTP模式)');
+        this.debugLog('系统初始化完成 (WebSocket模式)');
     }
 
     initializeUIState() {
@@ -198,7 +212,7 @@ class AICollectionAgent {
         if (dataPoints < 2) return;
         
         // 绘制延迟曲线
-        ctx.strokeStyle = '#28a745'; // HTTP版本使用绿色
+        ctx.strokeStyle = '#007bff';
         ctx.lineWidth = 2;
         ctx.beginPath();
         
@@ -217,7 +231,7 @@ class AICollectionAgent {
         ctx.stroke();
         
         // 绘制数据点
-        ctx.fillStyle = '#28a745';
+        ctx.fillStyle = '#007bff';
         for (let i = 0; i < dataPoints; i++) {
             const latency = Math.min(this.latencyChartData[i].latency, maxLatency);
             const x = 30 + (chartWidth * i / (this.maxLatencyDataPoints - 1));
@@ -231,26 +245,310 @@ class AICollectionAgent {
         // 显示最新延迟值
         if (dataPoints > 0) {
             const latestLatency = this.latencyChartData[dataPoints - 1].latency;
-            ctx.fillStyle = '#dc3545';
+            ctx.fillStyle = '#28a745';
             ctx.font = 'bold 12px Arial';
             ctx.fillText(`${latestLatency}ms`, width - 60, 25);
         }
     }
 
-    async checkServerConnection() {
+    async connectWebSocket() {
         try {
-            const response = await fetch(this.serverUrl);
-            if (response.ok) {
+            // 使用Socket.IO客户端
+            this.socket = io(this.serverUrl);
+            
+            this.socket.on('connect', () => {
                 this.isConnected = true;
-                this.updateConnectionStatus('online', 'HTTP服务器已连接');
-                this.debugLog('HTTP服务器连接成功');
-            } else {
-                throw new Error('Server not responding');
-            }
+                this.updateConnectionStatus('online', 'WebSocket已连接');
+                this.debugLog('WebSocket连接成功');
+            });
+
+            this.socket.on('disconnect', () => {
+                this.isConnected = false;
+                this.updateConnectionStatus('offline', 'WebSocket已断开');
+                this.debugLog('WebSocket连接断开');
+            });
+
+            this.socket.on('connected', (data) => {
+                this.debugLog('服务器确认连接: ' + data.status);
+            });
+
+            this.socket.on('text_response', (data) => {
+                // 显示完整文本回复
+                this.displayMessage('assistant', data.text);
+                this.debugLog('收到文本回复: ' + data.text.substring(0, 50) + '...');
+            });
+
+            this.socket.on('latency_metrics', (data) => {
+                // 接收服务器端延迟指标
+                this.debugLog(`🔄 服务器延迟指标 - LLM: ${data.llm_latency}ms, TTS: ${data.tts_latency}ms`);
+                this.updateServerLatencyMetrics(data.llm_latency, data.tts_latency);
+            });
+
+            this.socket.on('pcm_chunk', async (data) => {
+                // 接收并立即播放PCM数据块
+                this.debugLog(`收到PCM数据块 ${data.chunk_index} (段落 ${data.segment_index + 1}/${data.total_segments}): ${data.pcm_data.length} bytes`);
+                await this.playPCMChunkDirectly(data);
+            });
+
+            this.socket.on('pcm_segment_end', (data) => {
+                // PCM段落结束
+                this.debugLog(`PCM段落 ${data.segment_index + 1}/${data.total_segments} 结束，共 ${data.chunk_count} 个数据块`);
+            });
+
+            this.socket.on('audio_segment', (data) => {
+                // 兼容旧版本音频段落（非流式）
+                this.debugLog(`收到音频段落 ${data.segment_index + 1}/${data.total_segments}`);
+                this.audioQueue.push(data);
+                this.processAudioQueue();
+            });
+
+            this.socket.on('error', (data) => {
+                console.error('WebSocket错误:', data.error);
+                this.debugLog('WebSocket错误: ' + data.error);
+            });
+
         } catch (error) {
-            this.isConnected = false;
-            this.updateConnectionStatus('offline', 'HTTP服务器未连接');
-            this.debugLog('HTTP服务器连接失败: ' + error.message);
+            console.error('WebSocket连接失败:', error);
+            this.updateConnectionStatus('offline', 'WebSocket连接失败');
+            this.debugLog('WebSocket连接失败: ' + error.message);
+        }
+    }
+
+    async processAudioQueue() {
+        // 如果当前正在播放音频，等待完成
+        if (this.isPlayingAudio) {
+            return;
+        }
+
+        // 播放队列中的下一个音频段落
+        if (this.audioQueue.length > 0) {
+            const audioData = this.audioQueue.shift();
+            await this.playAudioSegment(audioData);
+            
+            // 播放完成后，检查是否还有更多段落
+            if (this.audioQueue.length > 0) {
+                setTimeout(() => this.processAudioQueue(), 100);
+            }
+        }
+    }
+
+    async playPCMChunkDirectly(data) {
+        try {
+            // 计算多种延迟指标 - 第一个PCM块到达时计算
+            if (data.chunk_index === 1 && data.segment_index === 0) {
+                const now = Date.now();
+                
+                // 1. 真实流式延迟：从服务器请求到首个音频块
+                if (this.serverRequestStartTime) {
+                    const serverToAudioLatency = now - this.serverRequestStartTime;
+                    this.debugLog(`🚀 服务器处理延迟: ${serverToAudioLatency}ms (请求→音频)`);
+                    this.updateLatencyMetrics(serverToAudioLatency);
+                }
+                
+                // 2. 端到端延迟：从客户停止说话到音频开始
+                if (this.customerStopTime) {
+                    const endToEndLatency = now - this.customerStopTime;
+                    this.debugLog(`⏱️ 端到端延迟: ${endToEndLatency}ms (停止说话→音频)`);
+                }
+                
+                // 3. ASR处理时间：从停止说话到发送请求
+                if (this.customerStopTime && this.serverRequestStartTime) {
+                    const asrProcessingTime = this.serverRequestStartTime - this.customerStopTime;
+                    this.debugLog(`🎤 ASR处理时间: ${asrProcessingTime}ms (停止说话→请求发送)`);
+                }
+                
+                // 重置序列化播放状态 - 新的音频流开始
+                this.resetPCMSequencing();
+            }
+            
+            // 将PCM块添加到缓存中，等待按序播放
+            const chunkKey = `${data.segment_index}-${data.chunk_index}`;
+            this.pcmChunkBuffer.set(chunkKey, data);
+            
+            this.debugLog(`收到PCM块: 段落${data.segment_index + 1}, 块${data.chunk_index}, 缓存大小: ${this.pcmChunkBuffer.size}`);
+            
+            // 尝试播放缓存中的顺序块
+            await this.processSequentialPCMChunks();
+            
+        } catch (error) {
+            console.error('处理PCM数据块失败:', error);
+            this.debugLog('PCM处理错误: ' + error.message);
+        }
+    }
+
+    resetPCMSequencing() {
+        // 清空缓存和重置状态
+        this.pcmChunkBuffer.clear();
+        this.expectedChunkIndex = 1;
+        this.currentSegmentIndex = -1;
+        this.pcmNextStartTime = 0; // 重置播放时间基准
+        this.debugLog('PCM序列化播放状态已重置');
+    }
+
+    async processSequentialPCMChunks() {
+        let processedAny = false;
+        
+        // 由于现在使用单一连续流，所有块都属于segment 0
+        // 只需要按chunk_index顺序处理即可
+        while (true) {
+            const targetSegment = 0; // 始终使用segment 0
+            const expectedKey = `${targetSegment}-${this.expectedChunkIndex}`;
+            const chunkData = this.pcmChunkBuffer.get(expectedKey);
+            
+            if (chunkData) {
+                // 找到期望的块，立即播放
+                await this.playPCMChunkInSequence(chunkData);
+                this.pcmChunkBuffer.delete(expectedKey);
+                this.expectedChunkIndex++;
+                processedAny = true;
+                
+                this.debugLog(`播放连续PCM块: 块${this.expectedChunkIndex - 1}`);
+            } else {
+                // 没有找到期望的块，等待后续块到达
+                break;
+            }
+        }
+        
+        if (processedAny) {
+            this.debugLog(`连续流处理完成，剩余缓存: ${this.pcmChunkBuffer.size} 块`);
+        }
+    }
+
+    async playPCMChunkInSequence(data) {
+        try {
+            // 确保音频上下文已激活
+            if (!this.audioContext) {
+                await this.initAudioContext();
+            }
+            
+            if (this.audioContext.state === 'suspended') {
+                await this.audioContext.resume();
+            }
+
+            // 创建PCM数据的AudioBuffer
+            const pcmData = new Uint8Array(data.pcm_data);
+            const sampleRate = data.sample_rate || 24000;
+            const channels = data.channels || 1;
+            const bitsPerSample = data.bits_per_sample || 16;
+            
+            // 将PCM数据转换为Float32Array
+            const samples = this.convertPCMToFloat32(pcmData, bitsPerSample);
+            const sampleCount = samples.length;
+            
+            if (sampleCount === 0) {
+                this.debugLog('跳过空的PCM数据块');
+                return;
+            }
+            
+            // 创建AudioBuffer
+            const audioBuffer = this.audioContext.createBuffer(channels, sampleCount, sampleRate);
+            audioBuffer.copyToChannel(samples, 0);
+            
+            // 创建音频源
+            const source = this.audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            
+            // 创建增益节点用于音量控制
+            if (!this.pcmGainNode) {
+                this.pcmGainNode = this.audioContext.createGain();
+                this.pcmGainNode.connect(this.audioContext.destination);
+            }
+            
+            source.connect(this.pcmGainNode);
+            
+            // 计算精确的播放时间，确保无缝连接
+            const currentTime = this.audioContext.currentTime;
+            const duration = sampleCount / sampleRate;
+            
+            // 对于第一个块，立即开始播放
+            let startTime;
+            if (this.pcmNextStartTime === 0 || currentTime > this.pcmNextStartTime + 0.1) {
+                // 第一个块或时间过期，立即开始
+                startTime = Math.max(currentTime + 0.01, currentTime); // 小缓冲避免immediate start问题
+                this.pcmNextStartTime = startTime + duration;
+            } else {
+                // 连续播放，确保无间隙
+                startTime = this.pcmNextStartTime;
+                this.pcmNextStartTime += duration;
+            }
+            
+            // 播放PCM数据块
+            source.start(startTime);
+            
+            // 记录第一个PCM块开始播放的时间
+            if (data.chunk_index === 1 && data.segment_index === 0) {
+                this.agentStartTime = Date.now();
+                this.debugLog('代理开始流式播放PCM音频');
+            }
+            
+            this.debugLog(`序列播放PCM: ${pcmData.length}字节, 时长: ${duration.toFixed(3)}s, 开始时间: ${startTime.toFixed(3)}s`);
+            
+            // 标记正在播放
+            this.isPlayingAudio = true;
+            this.pcmIsPlaying = true;
+            
+            // 设置播放结束回调
+            source.onended = () => {
+                this.debugLog(`PCM块播放完成: 段落${data.segment_index + 1}, 块${data.chunk_index}`);
+            };
+            
+        } catch (error) {
+            console.error('序列播放PCM数据块失败:', error);
+            this.debugLog('PCM序列播放错误: ' + error.message);
+        }
+    }
+
+    convertPCMToFloat32(pcmData, bitsPerSample) {
+        const samples = new Float32Array(pcmData.length / (bitsPerSample / 8));
+        
+        if (bitsPerSample === 16) {
+            // 16位PCM转换
+            for (let i = 0; i < samples.length; i++) {
+                const offset = i * 2;
+                const sample = (pcmData[offset] | (pcmData[offset + 1] << 8));
+                // 转换为有符号16位
+                const signedSample = sample > 32767 ? sample - 65536 : sample;
+                // 归一化到[-1, 1]
+                samples[i] = signedSample / 32768.0;
+            }
+        } else if (bitsPerSample === 8) {
+            // 8位PCM转换
+            for (let i = 0; i < samples.length; i++) {
+                const sample = pcmData[i];
+                // 8位PCM通常是无符号的，范围0-255
+                samples[i] = (sample - 128) / 128.0;
+            }
+        } else {
+            throw new Error(`不支持的PCM位深: ${bitsPerSample}`);
+        }
+        
+        return samples;
+    }
+
+    async playAudioSegment(audioData) {
+        try {
+            if (!audioData.audio || audioData.audio.length === 0) {
+                this.debugLog('音频段落为空，跳过播放');
+                return;
+            }
+
+            // 停止当前正在播放的音频
+            this.stopCurrentAudio();
+            
+            // 确保音频上下文已激活
+            if (this.audioContext.state === 'suspended') {
+                await this.audioContext.resume();
+            }
+
+            // 创建音频Blob并播放
+            const audioBlob = new Blob([new Uint8Array(audioData.audio)], { type: 'audio/wav' });
+            return await this.playAudioResponse(audioBlob);
+            
+        } catch (error) {
+            console.error('播放音频段落失败:', error);
+            this.debugLog('音频段落播放错误: ' + error.message);
+            this.isPlayingAudio = false;
+            throw error;
         }
     }
 
@@ -353,16 +651,6 @@ class AICollectionAgent {
         // 录音按钮 - 改为切换监听模式按钮
         const recordBtn = document.getElementById('record-btn');
         recordBtn.addEventListener('click', () => this.toggleListening());
-        
-        // 移除触屏设备支持 (不再需要push-to-talk)
-        // recordBtn.addEventListener('touchstart', (e) => {
-        //     e.preventDefault();
-        //     this.startRecording();
-        // });
-        // recordBtn.addEventListener('touchend', (e) => {
-        //     e.preventDefault();
-        //     this.stopRecording();
-        // });
 
         // 指标面板切换（内部切换）
         document.getElementById('toggle-metrics').addEventListener('click', () => {
@@ -457,7 +745,7 @@ class AICollectionAgent {
         }
 
         if (!this.isConnected) {
-            alert('HTTP服务器未连接，请检查服务器是否运行');
+            alert('WebSocket未连接，请检查服务器是否运行');
             return;
         }
 
@@ -465,13 +753,13 @@ class AICollectionAgent {
             // 确保监听状态重置
             this.isListening = false;
             this.isRecording = false;
-            this.customerHasResponded = false; // 重置客户回应状态
+            this.customerHasResponded = false;
             
-            // 设置会话 (无需连接延迟，服务器保持持久连接)
+            // 设置会话
             this.setupSession();
             this.sessionActive = true;
             
-            this.updateConnectionStatus('online', '会话已就绪');
+            this.updateConnectionStatus('online', 'WebSocket会话已就绪');
             
             // 更新按钮状态
             this.updateSessionButtons();
@@ -479,9 +767,9 @@ class AICollectionAgent {
             // 自动开始持续监听
             await this.startContinuousListening();
             
-            this.debugLog('会话开始 - 客户: ' + this.currentCustomer.name);
+            this.debugLog('WebSocket会话开始 - 客户: ' + this.currentCustomer.name);
             
-            // 立即播放初始问候语 (无延迟)
+            // 立即播放初始问候语
             this.speakInitialGreeting();
             
         } catch (error) {
@@ -496,6 +784,7 @@ class AICollectionAgent {
         this.metrics.sessionStart = Date.now();
         this.metrics.turnCount = 0;
         this.conversationHistory = [];
+        this.audioQueue = [];
         
         // 开始指标更新
         this.startMetricsUpdate();
@@ -516,7 +805,7 @@ class AICollectionAgent {
         }
     }
 
-    // 新增方法：切换监听模式
+    // 切换监听模式
     async toggleListening() {
         if (this.isListening) {
             this.stopContinuousListening();
@@ -525,7 +814,7 @@ class AICollectionAgent {
         }
     }
 
-    // 新增方法：开始持续监听
+    // 开始持续监听
     async startContinuousListening() {
         if (this.isListening) {
             this.debugLog('监听已在运行，跳过重复启动');
@@ -576,7 +865,7 @@ class AICollectionAgent {
         }
     }
 
-    // 新增方法：停止持续监听
+    // 停止持续监听
     stopContinuousListening() {
         if (!this.isListening) {
             this.debugLog('监听未在运行，跳过停止操作');
@@ -595,7 +884,7 @@ class AICollectionAgent {
         this.debugLog('持续监听已关闭，状态: ' + this.isListening);
     }
 
-    // 新增方法：语音活动检测
+    // 语音活动检测
     startVoiceActivityDetection() {
         const bufferLength = this.analyser.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
@@ -779,11 +1068,19 @@ class AICollectionAgent {
             // 标记客户开始回应
             this.customerHasResponded = true;
             
+            // 记录ASR开始时间
+            const asrStartTime = Date.now();
+            
             // 使用Speech Recognition API进行语音识别
             const transcript = await this.recognizeSpeech(audioBlob);
             
+            // 计算ASR延迟
+            const asrLatency = Date.now() - asrStartTime;
+            this.updateASRLatencyMetrics(asrLatency);
+            this.debugLog(`🎤 ASR处理完成: ${asrLatency}ms`);
+            
             if (transcript) {
-                // 发送到HTTP服务器获取AI回复 (不在这里显示消息，避免重复)
+                // 发送到WebSocket服务器获取AI回复
                 await this.sendMessageToAI(transcript);
             } else {
                 this.debugLog('未识别到有效语音');
@@ -821,6 +1118,11 @@ class AICollectionAgent {
                 greetingAudio.play().catch(reject);
             });
             
+            // 等待2秒看客户是否回应
+            this.debugLog('等待客户回应...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // 如果客户在2秒内没有回应，继续说话
             if (!this.customerHasResponded) {
                 this.debugLog('客户未回应，继续问候流程');
                 await this.continueGreetingSequence(customer);
@@ -835,53 +1137,25 @@ class AICollectionAgent {
 
     async continueGreetingSequence(customer) {
         try {
-            // 分段问候信息，每段不超过4句话
-            const greetingSegments = [
+            // 合并问候信息为单一连续消息
+            const fullGreeting = [
                 `${customer.name}您好，我是平安银行催收专员，工号888888。`,
                 `根据我行记录，您有一笔${this.formatChineseAmount(customer.balance)}的逾期本金，逾期了${customer.daysOverdue}天，已上报征信系统。`,
                 `请问您现在方便谈论还款安排吗？`
-            ];
+            ].join('');
             
-            for (let i = 0; i < greetingSegments.length; i++) {
-                // 如果客户在此期间开始说话，停止问候序列
-                if (this.customerHasResponded) {
-                    this.debugLog('客户开始回应，停止问候序列');
-                    break;
-                }
-                
-                const segment = greetingSegments[i];
-                this.debugLog(`播放问候片段 ${i + 1}: ${segment}`);
-                
-                // 显示文本
-                this.displayMessage('assistant', segment);
-                
-                // 生成并播放音频
-                const response = await fetch(`${this.serverUrl}/api/chat`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        message: segment,
-                        messageType: 'agent_greeting'
-                    })
-                });
-
-                if (response.ok) {
-                    const responseData = await response.json();
-                    if (responseData.audio) {
-                        const audioBlob = new Blob([new Uint8Array(responseData.audio)], { type: 'audio/wav' });
-                        await this.playAudioResponse(audioBlob);
-                    }
-                }
-                
-                // 在片段之间等待2秒，检查客户是否回应
-                if (i < greetingSegments.length - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                }
-            }
+            this.debugLog(`播放完整问候语: ${fullGreeting}`);
             
-            this.debugLog('问候序列完成，等待客户回复');
+            // 显示完整文本
+            this.displayMessage('assistant', fullGreeting);
+            
+            // 通过WebSocket生成并播放单一连续音频流
+            this.socket.emit('chat_message', {
+                message: fullGreeting,
+                messageType: 'agent_greeting'
+            });
+            
+            this.debugLog('完整问候语已发送，等待客户回复');
             
         } catch (error) {
             console.error('问候序列播放失败:', error);
@@ -892,8 +1166,7 @@ class AICollectionAgent {
     async recognizeSpeech(audioBlob) {
         try {
             // Send the recorded audio to a speech recognition service
-            // For now, we'll use a simple implementation that sends audio to our server
-            // The server can then use OpenAI's Whisper API for transcription
+            // The server can then use DashScope ASR for transcription
             
             const formData = new FormData();
             formData.append('audio', audioBlob, 'recording.webm');
@@ -927,7 +1200,7 @@ class AICollectionAgent {
         }
     }
 
-    // 新增方法：验证转录内容是否有效
+    // 验证转录内容是否有效
     isValidTranscript(transcript) {
         if (!transcript || transcript.trim().length < 2) {
             return false;
@@ -942,14 +1215,14 @@ class AICollectionAgent {
             /订阅.*转发/,
             /打赏支持/,
             /明镜.*点点栏目/,
-            /amara\.org/i,
+            /amara\\.org/i,
             /subtitle/i,
-            /^[。，、！？\s]*$/, // 只有标点符号
-            /^[a-zA-Z\s]*$/, // 只有英文字母
-            /^\d+[\s\d]*$/, // 只有数字
+            /^[。，、！？\\s]*$/, // 只有标点符号
+            /^[a-zA-Z\\s]*$/, // 只有英文字母
+            /^\\d+[\\s\\d]*$/, // 只有数字
             /音乐/,
             /背景音/,
-            /\[.*\]/, // 括号内容（通常是描述音效等）
+            /\\[.*\\]/, // 括号内容（通常是描述音效等）
             /（.*）/, // 中文括号内容
         ];
         
@@ -960,7 +1233,7 @@ class AICollectionAgent {
         }
         
         // 检查是否包含中文字符（催收对话应该主要是中文）
-        const hasChinese = /[\u4e00-\u9fff]/.test(transcript);
+        const hasChinese = /[\\u4e00-\\u9fff]/.test(transcript);
         if (!hasChinese && transcript.length > 10) {
             return false; // 长文本没有中文字符，可能是无关内容
         }
@@ -981,153 +1254,43 @@ class AICollectionAgent {
 
     async sendMessageToAI(message) {
         try {
-            // 获取响应的处理开始时间（仅用于服务器处理时间测量）
-            const serverStartTime = Date.now();
-            
-            // Build the full contextual message with conversation history and rules
-            const contextualMessage = this.buildContextualMessage(message);
-            
-            // Send the contextual message to the AI
-            const response = await fetch(`${this.serverUrl}/api/chat`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    message: contextualMessage,
-                    messageType: 'customer_with_context',
-                    customerContext: {
-                        name: this.currentCustomer.name,
-                        balance: this.currentCustomer.balance,
-                        daysOverdue: this.currentCustomer.daysOverdue,
-                        previousContacts: this.currentCustomer.previousContacts,
-                        riskLevel: this.currentCustomer.riskLevel,
-                        scenario: this.currentScenario
-                    },
-                    conversationHistory: this.conversationHistory
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            if (!this.isConnected) {
+                throw new Error('WebSocket未连接');
             }
 
-            const serverProcessTime = Date.now() - serverStartTime;
-            
             // Display the customer message first
             this.displayMessage('user', message);
             
-            // 获取响应 (包含音频和文本)
-            const responseData = await response.json();
+            // 记录准确的服务器请求开始时间（用于真实流式延迟计算）
+            this.serverRequestStartTime = Date.now();
             
-            // 播放音频并计算真实的响应延迟
-            if (responseData.audio) {
-                const audioBlob = new Blob([new Uint8Array(responseData.audio)], { type: 'audio/wav' });
-                await this.playAudioResponse(audioBlob);
-                
-                // 计算真实的响应延迟：从客户停止说话到代理开始说话
-                if (this.customerStopTime && this.agentStartTime) {
-                    const realLatency = this.agentStartTime - this.customerStopTime;
-                    this.updateLatencyMetrics(realLatency);
-                    this.debugLog(`真实响应延迟: ${realLatency}ms (服务器处理: ${serverProcessTime}ms)`);
-                }
-            }
-            
-            // 显示AI的文本回复
-            if (responseData.text) {
-                this.displayMessage('assistant', responseData.text);
-            } else {
-                this.displayMessage('assistant', '[语音回复]');
-            }
+            // 通过WebSocket发送消息
+            this.socket.emit('chat_message', {
+                message: message,
+                messageType: 'customer_with_context',
+                customerContext: {
+                    name: this.currentCustomer.name,
+                    balance: this.currentCustomer.balance,
+                    daysOverdue: this.currentCustomer.daysOverdue,
+                    previousContacts: this.currentCustomer.previousContacts,
+                    riskLevel: this.currentCustomer.riskLevel,
+                    scenario: this.currentScenario
+                },
+                conversationHistory: this.conversationHistory
+            });
             
             // 更新会话统计
             this.updateSessionStats();
             
-            // 评估转录准确性（如果有AI回复文本）
-            if (responseData.text && message) {
-                this.evaluateTranscriptAccuracy(responseData.text, message);
-            }
+            this.debugLog('通过WebSocket发送消息: ' + message);
             
         } catch (error) {
             console.error('发送消息失败:', error);
-            this.debugLog('错误: AI回复失败 - ' + error.message);
+            this.debugLog('错误: 消息发送失败 - ' + error.message);
             
             // 显示错误消息
             this.displayMessage('assistant', '抱歉，我暂时无法回复。请稍后重试。');
         }
-    }
-
-    buildContextualMessage(userMessage) {
-        const customer = this.currentCustomer;
-        const scenario = this.currentScenario;
-        
-        const scenarios = {
-            'overdue_payment': '处理逾期付款催收',
-            'payment_plan': '制定还款计划',
-            'difficult_customer': '处理困难客户',
-            'first_contact': '首次联系客户'
-        };
-
-        // 构建对话历史
-        let conversationHistoryText = '';
-        if (this.conversationHistory.length > 0) {
-            conversationHistoryText = '\n本次通话记录:\n';
-            this.conversationHistory.forEach((entry, index) => {
-                const role = entry.sender === 'user' ? '客户' : '催收员';
-                conversationHistoryText += `${index + 1}. ${role}: ${entry.text}\n`;
-            });
-            conversationHistoryText += `${this.conversationHistory.length + 1}. 客户: ${userMessage}\n`;
-        } else {
-            conversationHistoryText = `\n本次通话记录:\n1. 客户: ${userMessage}\n`;
-        }
-
-        const systemContext = `你是平安银行信用卡中心的专业催收专员，正在进行电话催收工作。
-
-客户档案信息:
-- 客户姓名: ${customer.name}
-- 逾期本金: ${this.formatChineseAmount(customer.balance)}
-- 逾期天数: ${customer.daysOverdue}天
-- 联系历史: ${customer.previousContacts}次
-- 风险等级: ${customer.riskLevel}
-
-当前催收场景: ${scenarios[scenario]}
-${conversationHistoryText}
-
-基于真实催收对话的标准话术:
-
-【核实确认】
-- "我看您这边的话在[日期]还了一笔，还了[金额]"
-- "当前的话还差[具体金额]，没有还够"
-
-【理解回应】  
-- "也没有人说有钱不去还这个信用卡的，我可以理解"
-- "可以理解，您的还款压力确实也是挺大的"
-
-【方案提供】
-- "当前的话还是属于一个内部协商"
-- "银行这边可以帮您减免一部分息费"
-- "还可以帮您去撤销这个余薪案件的"
-
-【专业用语】
-- 使用"您这边的话"、"当前的话"、"是吧"等真实催收用语
-- 使用"内部协商"、"余薪案件"、"全额减免方案政策"等专业术语
-
-【重要原则】
-1. 保持理解耐心的态度，避免强硬施压
-2. 用具体数据建立可信度  
-3. 提供多种解决方案
-4. 关注客户感受和实际困难
-5. 使用银行专业术语增强权威性
-6. 每一次回答尽量简练，不要超过4句话，最好在1-2句，避免长篇大论，确保客户能听懂
-
-其它注意语言事项:
-- 使用大陆标准普通话，避免使用台湾或香港的用语，及台湾国语
-- 15,000元应该被称为"一万五千元"，而不是"十五千元"
-- 语气要专业、理解，体现人文关怀
-
-请基于完整的通话记录和真实催收对话模式，以专业催收员的身份回应客户最新的话语。要体现催收员的专业性和人文关怀，避免重复之前已经讨论过的内容。`;
-
-        return systemContext;
     }
 
     async playAudioResponse(audioBlob) {
@@ -1193,14 +1356,32 @@ ${conversationHistoryText}
         }
     }
 
-    // 新增方法：停止当前播放的音频
+    // 停止当前播放的音频
     stopCurrentAudio() {
+        // 停止传统音频播放
         if (this.currentAudio && !this.currentAudio.paused) {
             this.currentAudio.pause();
             this.currentAudio.currentTime = 0;
             this.debugLog('停止当前播放的音频');
         }
+        
+        // 停止流式PCM播放
+        if (this.pcmIsPlaying) {
+            // 重置PCM播放时间戳，停止后续PCM块的播放
+            this.pcmNextStartTime = 0;
+            this.pcmIsPlaying = false;
+            this.debugLog('停止PCM流式音频播放');
+        }
+        
+        // 清空PCM缓存和重置序列状态
+        this.resetPCMSequencing();
+        
         this.isPlayingAudio = false;
+        
+        // 清空音频队列
+        this.audioQueue = [];
+        this.pcmAudioQueue = [];
+        this.debugLog('清空音频队列和PCM缓存');
     }
 
     displayMessage(sender, text) {
@@ -1231,22 +1412,10 @@ ${conversationHistoryText}
         try {
             const testMessage = '你好，这是一个测试消息。请确认你能听到清晰的中文语音。';
             
-            const response = await fetch(`${this.serverUrl}/api/chat`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    message: testMessage
-                })
+            this.socket.emit('chat_message', {
+                message: testMessage,
+                messageType: 'agent_greeting'
             });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-            
-            const audioBlob = await response.blob();
-            await this.playAudioResponse(audioBlob);
             
             this.debugLog('音频测试完成');
             
@@ -1254,6 +1423,35 @@ ${conversationHistoryText}
             console.error('音频测试失败:', error);
             this.debugLog('音频测试失败: ' + error.message);
         }
+    }
+
+    updateASRLatencyMetrics(asrLatency) {
+        this.metrics.asrLatency.push({
+            latency: asrLatency,
+            timestamp: Date.now()
+        });
+        
+        // 更新ASR延迟显示
+        document.getElementById('asr-latency').textContent = asrLatency + ' ms';
+        this.debugLog(`ASR延迟记录: ${asrLatency}ms`);
+    }
+
+    updateServerLatencyMetrics(llmLatency, ttsLatency) {
+        this.metrics.llmLatency.push({
+            latency: llmLatency,
+            timestamp: Date.now()
+        });
+        
+        this.metrics.ttsLatency.push({
+            latency: ttsLatency,
+            timestamp: Date.now()
+        });
+        
+        // 更新LLM和TTS延迟显示
+        document.getElementById('llm-latency').textContent = llmLatency + ' ms';
+        document.getElementById('tts-latency').textContent = ttsLatency + ' ms';
+        
+        this.debugLog(`服务器延迟记录 - LLM: ${llmLatency}ms, TTS: ${ttsLatency}ms`);
     }
 
     updateLatencyMetrics(latency) {
@@ -1495,12 +1693,12 @@ ${conversationHistoryText}
         this.stopCurrentAudio();
         
         this.sessionActive = false;
-        this.updateConnectionStatus('offline', '会话已结束');
+        this.updateConnectionStatus('offline', 'WebSocket会话已结束');
         
         // 更新按钮状态
         this.updateSessionButtons();
         
-        this.debugLog('会话结束');
+        this.debugLog('WebSocket会话结束');
     }
 
     resetSession() {
@@ -1512,11 +1710,17 @@ ${conversationHistoryText}
         this.sessionActive = false;
         this.isListening = false;
         this.isRecording = false;
+        this.audioQueue = [];
         this.metrics = {
             latency: [],
             accuracy: [],
             sessionStart: null,
-            turnCount: 0
+            turnCount: 0,
+            // 详细延迟指标
+            asrLatency: [],
+            llmLatency: [],
+            ttsLatency: [],
+            endToEndLatency: []
         };
         
         // 清空UI
@@ -1528,6 +1732,9 @@ ${conversationHistoryText}
         document.getElementById('current-latency').textContent = '-- ms';
         document.getElementById('avg-latency').textContent = '-- ms';
         document.getElementById('latency-grade').textContent = '--';
+        document.getElementById('asr-latency').textContent = '-- ms';
+        document.getElementById('llm-latency').textContent = '-- ms';
+        document.getElementById('tts-latency').textContent = '-- ms';
         document.getElementById('turn-count').textContent = '0';
         document.getElementById('session-duration').textContent = '00:00';
         document.getElementById('success-rate').textContent = '--%';
@@ -1547,7 +1754,7 @@ ${conversationHistoryText}
         });
         
         this.currentCustomer = null;
-        this.debugLog('会话已重置');
+        this.debugLog('WebSocket会话已重置');
     }
 
     updateConnectionStatus(status, text) {
@@ -1574,11 +1781,11 @@ ${conversationHistoryText}
 
 // 页面加载完成后初始化
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('页面加载完成，初始化AI催收助手 (HTTP版本)...');
-    window.aiAgent = new AICollectionAgent();
+    console.log('页面加载完成，初始化AI催收助手 (WebSocket版本)...');
+    window.aiAgent = new AICollectionAgentWS();
 });
 
 // 导出类以便测试
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = AICollectionAgent;
+    module.exports = AICollectionAgentWS;
 }

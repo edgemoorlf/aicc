@@ -75,7 +75,7 @@
         </section>
 
         <!-- Main Interface -->
-        <div class="main-interface">
+        <div class="main-interface" id="main-interface">
             <!-- Conversation Area -->
             <section class="conversation-area">
                 <div class="conversation-header">
@@ -105,9 +105,21 @@
                     <div class="metric-group">
                         <h4>延迟指标</h4>
                         <div class="metric-item">
-                            <span class="metric-label">当前延迟:</span>
+                            <span class="metric-label">总延迟:</span>
                             <span id="current-latency" class="metric-value">-- ms</span>
                             <span id="latency-grade" class="metric-grade">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">ASR延迟:</span>
+                            <span id="asr-latency" class="metric-value">-- ms</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">LLM延迟:</span>
+                            <span id="llm-latency" class="metric-value">-- ms</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">TTS延迟:</span>
+                            <span id="tts-latency" class="metric-value">-- ms</span>
                         </div>
                         <div class="metric-item">
                             <span class="metric-label">平均延迟:</span>
@@ -175,7 +187,8 @@
     </div>
 
     <!-- Scripts -->
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script src="config.js"></script>
-    <script src="http-client.js"></script>
+    <script src="websocket-client.js"></script>
 </body>
 </html>

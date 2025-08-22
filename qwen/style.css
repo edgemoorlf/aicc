@@ -171,6 +171,20 @@ select:focus {
     margin-bottom: 20px;
 }
 
+/* Full width conversation area when metrics dashboard is hidden */
+.main-interface:has(.metrics-dashboard[style*="display: none"]) {
+    grid-template-columns: 1fr;
+}
+
+/* Fallback for browsers that don't support :has() selector */
+.main-interface.metrics-hidden {
+    grid-template-columns: 1fr;
+}
+
+.main-interface.metrics-hidden .metrics-dashboard {
+    display: none !important;
+}
+
 /* Conversation Area */
 .conversation-area {
     background: white;

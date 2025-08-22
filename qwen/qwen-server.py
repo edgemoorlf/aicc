@@ -2,12 +2,14 @@
 # 基于Python Flask + Alibaba Cloud APIs
 
 import os
+import re
 import json
 import base64
 import time
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 import dashscope
 from dashscope import Generation
 from dashscope.audio.asr import Recognition
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # 配置
 DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY')
@@ -39,6 +42,83 @@ def index():
 @app.route('/<path:filename>')
 def static_files(filename):
     return send_from_directory('.', filename)
+
+def merge_wav_audio(wav_segments):
+    """合并多个WAV音频段落为一个完整的WAV文件"""
+    if not wav_segments:
+        return []
+    
+    if len(wav_segments) == 1:
+        return wav_segments[0]
+    
+    import struct
+    
+    # 收集所有PCM数据（跳过每个WAV的44字节头）
+    all_pcm_data = b''
+    
+    for wav_data in wav_segments:
+        if len(wav_data) > 44:  # 确保有WAV头
+            pcm_data = bytes(wav_data[44:])  # 跳过44字节的WAV头
+            all_pcm_data += pcm_data
+        else:
+            # 如果数据太短，当作PCM数据处理
+            all_pcm_data += bytes(wav_data)
+    
+    # 创建新的WAV头用于合并的音频
+    sample_rate = 24000  # 24kHz（与DashScope TTS一致）
+    num_channels = 1     # 单声道
+    bits_per_sample = 16 # 16位PCM
+    data_size = len(all_pcm_data)
+    file_size = 36 + data_size
+    
+    # 创建WAV文件头
+    header = bytearray(44)
+    
+    # RIFF chunk
+    header[0:4] = b'RIFF'
+    struct.pack_into('<I', header, 4, file_size)
+    header[8:12] = b'WAVE'
+    
+    # fmt chunk
+    header[12:16] = b'fmt '
+    struct.pack_into('<I', header, 16, 16)  # fmt chunk size
+    struct.pack_into('<H', header, 20, 1)   # PCM format
+    struct.pack_into('<H', header, 22, num_channels)
+    struct.pack_into('<I', header, 24, sample_rate)
+    struct.pack_into('<I', header, 28, sample_rate * num_channels * bits_per_sample // 8)  # byte rate
+    struct.pack_into('<H', header, 32, num_channels * bits_per_sample // 8)  # block align
+    struct.pack_into('<H', header, 34, bits_per_sample)
+    
+    # data chunk
+    header[36:40] = b'data'
+    struct.pack_into('<I', header, 40, data_size)
+    
+    # 合并头部和PCM数据
+    merged_wav = bytes(header) + all_pcm_data
+    
+    logger.info(f'合并WAV音频: {len(wav_segments)}个段落 -> {len(merged_wav)} bytes')
+    return list(merged_wav)
+
+def segment_ai_response(ai_text):
+    """将AI回复按照催收员标记分段，并清理格式"""
+    import re
+    
+    # 分割文本，查找 "催收员:" 模式（可能前面有数字编号）
+    # 匹配模式：可选的数字和点，然后是"催收员:"
+    segments = re.split(r'\d*\.?\s*催收员[：:]\s*', ai_text)
+    
+    # 过滤掉空段落并清理
+    clean_segments = []
+    for segment in segments:
+        segment = segment.strip()
+        if segment:  # 只保留非空段落
+            clean_segments.append(segment)
+    
+    logger.info(f'AI回复分段: 原文长度={len(ai_text)}, 分段数={len(clean_segments)}')
+    for i, seg in enumerate(clean_segments):
+        logger.info(f'段落{i+1}: "{seg[:50]}..."')
+    
+    return clean_segments
 
 # API端点：发送消息并获取音频响应
 @app.route('/api/chat', methods=['POST'])
@@ -68,16 +148,38 @@ def chat():
         
         if not ai_response:
             return jsonify({'error': '生成AI回复失败'}), 500
+        
+        # 将AI回复分段
+        segments = segment_ai_response(ai_response)
+        
+        if not segments:
+            # 如果没有分段，直接使用原文
+            segments = [ai_response]
+        
+        # 为第一个段落生成语音并立即返回（低延迟优先）
+        if segments:
+            first_segment = segments[0]
+            logger.info(f'生成第1段语音（优先返回）: {first_segment[:30]}...')
+            first_audio = generate_tts_audio(first_segment)
             
-        # 生成语音
-        audio_data = generate_tts_audio(ai_response)
-        
-        logger.info(f'AI回复: {ai_response[:50]}...')
-        
-        return jsonify({
-            'audio': audio_data,
-            'text': ai_response
-        })
+            # 如果有多个段落，记录剩余段落（可以后续通过其他机制处理）
+            if len(segments) > 1:
+                logger.info(f'剩余{len(segments)-1}个段落将被跳过，优先低延迟响应')
+                # TODO: 可以考虑通过WebSocket或其他机制发送剩余段落
+            
+            logger.info(f'AI回复: {ai_response[:50]}... (立即返回第1段，共{len(segments)}段)')
+            
+            return jsonify({
+                'audio': first_audio if first_audio else [],
+                'text': ai_response  # 返回完整文本用于显示
+            })
+        else:
+            # 没有分段，返回空音频
+            logger.warning('没有找到有效的AI回复段落')
+            return jsonify({
+                'audio': [],
+                'text': ai_response
+            })
         
     except Exception as e:
         logger.error(f'聊天处理错误: {str(e)}')
@@ -206,19 +308,30 @@ def build_collection_prompt(customer_context, conversation_history, user_message
 3. 提供多种解决方案
 4. 关注客户感受和实际困难
 5. 使用银行专业术语增强权威性
+6. 每一次回答尽量简练，不要超过4句话，最好在1-2句，避免长篇大论，确保客户能听懂
+7. **严禁重复之前已经说过的内容** - 仔细查看通话记录，避免重复相同的话术、问题或信息
+8. **根据对话进展调整策略** - 每次回复都要基于客户的最新回应，推进对话而不是重复
+
+【防重复指南】
+- 如果客户已经表达了某种态度或立场，不要重复询问相同的问题
+- 如果已经提到过某种解决方案，不要再次重复介绍
+- 根据客户的具体回应，选择新的角度或更深入的探讨
+- 避免使用完全相同的开场白或结束语
 
 语言要求:
 - 使用大陆标准普通话，避免台湾用语
 - 金额表达: 15000元说成"一万五千元"，不是"十五千元"
 - 语气要专业、理解，体现人文关怀
 
-请基于完整的通话记录，以专业催收员的身份回应客户最新的话语。"""
+请仔细分析完整的通话记录，确保不重复之前的内容，以专业催收员的身份针对客户最新话语给出新的、有进展的回应。"""
 
     return system_prompt
 
 def generate_ai_response(system_prompt):
     """使用通义千问生成AI回复"""
     try:
+        llm_start_time = time.time()
+        
         response = Generation.call(
             model='qwen-plus',
             messages=[
@@ -230,92 +343,135 @@ def generate_ai_response(system_prompt):
             result_format='message'
         )
         
+        llm_latency = int((time.time() - llm_start_time) * 1000)
+        
         if response.status_code == 200:
             ai_text = response.output.choices[0].message.content
-            # 移除可能的"催收员："前缀
             ai_text = ai_text.strip()
-            if ai_text.startswith('催收员：'):
-                ai_text = ai_text[4:].strip()  # 移除"催收员："前缀
-            elif ai_text.startswith('催收员:'):
-                ai_text = ai_text[3:].strip()  # 移除"催收员:"前缀（英文冒号）
-            return ai_text
+            logger.info(f'通义千问LLM处理完成: {llm_latency}ms')
+            return ai_text, llm_latency
         else:
             logger.error(f'通义千问API调用失败: {response.status_code}')
-            return None
+            return None, 0
             
     except Exception as e:
         logger.error(f'生成AI回复错误: {str(e)}')
-        return None
+        return None, 0
+
+def generate_tts_audio_streaming(text, segment_index=0, total_segments=1):
+    """使用通义千问TTS生成语音，实时流式发送PCM数据"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            logger.info(f'开始流式TTS音频生成 (尝试 {attempt + 1}/{max_retries}): {text[:30]}...')
+            
+            tts_start_time = time.time()
+            
+            # 使用流式方式，生成PCM数据流
+            responses = dashscope.audio.qwen_tts.SpeechSynthesizer.call(
+                model="qwen-tts",
+                api_key=DASHSCOPE_API_KEY,  # 显式传递API key
+                text=text,
+                voice="Cherry",  # 中文女声 - 使用支持的声音
+                stream=True  # 使用流式处理，实时返回PCM数据
+            )
+            
+            # 检查responses是否为None
+            if responses is None:
+                raise ValueError("TTS API返回None响应")
+            
+            # 实时流式发送PCM数据块
+            chunk_count = 0
+            first_chunk_time = None
+            
+            for chunk in responses:
+                if chunk and "output" in chunk and "audio" in chunk["output"] and "data" in chunk["output"]["audio"]:
+                    audio_string = chunk["output"]["audio"]["data"]
+                    pcm_bytes = base64.b64decode(audio_string)
+                    if pcm_bytes:
+                        chunk_count += 1
+                        
+                        # 记录第一个块的时间（TTS首次响应延迟）
+                        if first_chunk_time is None:
+                            first_chunk_time = time.time()
+                            tts_first_chunk_latency = int((first_chunk_time - tts_start_time) * 1000)
+                        
+                        logger.info(f'流式发送TTS PCM数据块 {chunk_count}: {len(pcm_bytes)} bytes')
+                        
+                        # 立即通过WebSocket发送PCM数据块
+                        socketio.emit('pcm_chunk', {
+                            'pcm_data': list(pcm_bytes),
+                            'chunk_index': chunk_count,
+                            'segment_index': segment_index,
+                            'total_segments': total_segments,
+                            'text': text,
+                            'sample_rate': 24000,  # DashScope TTS输出24kHz
+                            'channels': 1,
+                            'bits_per_sample': 16
+                        })
+            
+            if chunk_count > 0:
+                tts_total_latency = int((time.time() - tts_start_time) * 1000)
+                logger.info(f'流式TTS完成 (尝试 {attempt + 1}): 发送了{chunk_count}个PCM数据块')
+                logger.info(f'TTS延迟指标 - 首块: {tts_first_chunk_latency if first_chunk_time else 0}ms, 总计: {tts_total_latency}ms')
+                
+                # 发送段落结束信号
+                socketio.emit('pcm_segment_end', {
+                    'segment_index': segment_index,
+                    'total_segments': total_segments,
+                    'chunk_count': chunk_count
+                })
+                
+                # 返回TTS首次响应延迟（用于延迟指标）
+                return tts_first_chunk_latency if first_chunk_time else tts_total_latency
+            else:
+                raise ValueError("TTS响应中没有音频数据")
+                
+        except Exception as e:
+            logger.error(f'流式TTS生成失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}')
+            if attempt == max_retries - 1:
+                logger.error('流式TTS重试次数已用完，生成失败')
+                return False
+            else:
+                logger.info(f'等待1秒后重试...')
+                import time
+                time.sleep(1)
 
 def generate_tts_audio(text):
-    """使用通义千问TTS生成语音，带重试机制"""
+    """兼容性函数：使用通义千问TTS生成语音，返回PCM数据块列表"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
             logger.info(f'生成TTS音频 (尝试 {attempt + 1}/{max_retries}): {text[:30]}...')
             
-            # 使用非流式方式，直接生成完整的WAV格式
-            response = dashscope.audio.qwen_tts.SpeechSynthesizer.call(
+            # 使用流式方式，生成PCM数据流
+            responses = dashscope.audio.qwen_tts.SpeechSynthesizer.call(
                 model="qwen-tts",
                 api_key=DASHSCOPE_API_KEY,  # 显式传递API key
                 text=text,
                 voice="Cherry",  # 中文女声 - 使用支持的声音
-                format='wav',  # WAV格式
-                stream=False  # 非流式处理，获得完整WAV文件
+                stream=True  # 使用流式处理，实时返回PCM数据
             )
             
-            # 检查response是否为None
-            if response is None:
+            # 检查responses是否为None
+            if responses is None:
                 raise ValueError("TTS API返回None响应")
             
-            # 检查响应状态
-            if hasattr(response, 'status_code') and response.status_code == 200:
-                if hasattr(response, 'output') and response.output and hasattr(response.output, 'audio'):
-                    audio_data = response.output.audio
-                    logger.info(f'音频数据类型: {type(audio_data)}')
-                    
-                    wav_data = None
-                    if isinstance(audio_data, str):
-                        # Base64编码的音频数据
-                        wav_data = base64.b64decode(audio_data)
-                        logger.info(f'从字符串解码WAV数据: {len(wav_data)} bytes')
-                    elif hasattr(audio_data, 'data'):
-                        # 音频数据在data字段中
-                        wav_data = base64.b64decode(audio_data.data)
-                        logger.info(f'从data字段解码WAV数据: {len(wav_data)} bytes')
-                    elif isinstance(audio_data, dict):
-                        # 字典格式，优先检查URL字段
-                        if 'url' in audio_data and audio_data['url']:
-                            # 从URL下载音频
-                            import requests
-                            logger.info(f'从URL下载音频: {audio_data["url"]}')
-                            try:
-                                audio_response = requests.get(audio_data['url'])
-                                if audio_response.status_code == 200:
-                                    wav_data = audio_response.content
-                                    logger.info(f'从URL下载WAV数据: {len(wav_data)} bytes')
-                                else:
-                                    raise ValueError(f"URL下载失败，状态码: {audio_response.status_code}")
-                            except Exception as e:
-                                raise ValueError(f"URL下载异常: {str(e)}")
-                        elif 'data' in audio_data and audio_data['data']:
-                            # 从data字段获取base64数据
-                            wav_data = base64.b64decode(audio_data['data'])
-                            logger.info(f'从字典data字段解码WAV数据: {len(wav_data)} bytes')
-                        else:
-                            raise ValueError(f"字典中没有有效的url或data字段: {list(audio_data.keys())}")
-                    else:
-                        raise ValueError(f"音频数据格式异常: {type(audio_data)}")
-                    
-                    if wav_data:
-                        logger.info(f'TTS音频生成成功 (尝试 {attempt + 1}): WAV数据长度 {len(wav_data)} bytes')
-                        return list(wav_data)
-                    else:
-                        raise ValueError("无法解码音频数据")
-                else:
-                    raise ValueError(f"响应中没有音频数据: {response.output}")
+            # 流式返回PCM数据块
+            pcm_chunks = []
+            for chunk in responses:
+                if chunk and "output" in chunk and "audio" in chunk["output"] and "data" in chunk["output"]["audio"]:
+                    audio_string = chunk["output"]["audio"]["data"]
+                    pcm_bytes = base64.b64decode(audio_string)
+                    if pcm_bytes:
+                        pcm_chunks.append(list(pcm_bytes))
+                        logger.info(f'TTS PCM数据块: {len(pcm_bytes)} bytes')
+            
+            if pcm_chunks:
+                logger.info(f'TTS音频生成成功 (尝试 {attempt + 1}): 总共{len(pcm_chunks)}个PCM数据块')
+                return pcm_chunks  # 返回PCM数据块列表
             else:
-                raise ValueError(f"TTS API调用失败，状态码: {getattr(response, 'status_code', '未知')}")
+                raise ValueError("TTS响应中没有音频数据")
                 
         except Exception as e:
             logger.error(f'TTS生成失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}')
@@ -326,42 +482,6 @@ def generate_tts_audio(text):
                 logger.info(f'等待1秒后重试...')
                 import time
                 time.sleep(1)
-
-def create_wav_buffer(pcm_data):
-    """将PCM16数据转换为WAV格式"""
-    import struct
-    
-    # WAV文件参数 (基于test_qwen_tts.py中的配置)
-    sample_rate = 24000  # 24kHz
-    num_channels = 1     # 单声道
-    bits_per_sample = 16 # 16位PCM
-    data_size = len(pcm_data)
-    file_size = 36 + data_size
-    
-    # 创建WAV文件头
-    header = bytearray(44)
-    
-    # RIFF chunk
-    header[0:4] = b'RIFF'
-    struct.pack_into('<I', header, 4, file_size)
-    header[8:12] = b'WAVE'
-    
-    # fmt chunk
-    header[12:16] = b'fmt '
-    struct.pack_into('<I', header, 16, 16)  # fmt chunk size
-    struct.pack_into('<H', header, 20, 1)   # PCM format
-    struct.pack_into('<H', header, 22, num_channels)
-    struct.pack_into('<I', header, 24, sample_rate)
-    struct.pack_into('<I', header, 28, sample_rate * num_channels * bits_per_sample // 8)  # byte rate
-    struct.pack_into('<H', header, 32, num_channels * bits_per_sample // 8)  # block align
-    struct.pack_into('<H', header, 34, bits_per_sample)
-    
-    # data chunk
-    header[36:40] = b'data'
-    struct.pack_into('<I', header, 40, data_size)
-    
-    # 合并头部和PCM数据
-    return bytes(header) + pcm_data
 
 def recognize_speech_dashscope(audio_file):
     """使用DashScope进行语音识别"""
@@ -617,7 +737,83 @@ def calculate_basic_similarity(text1, text2):
     
     return int(similarity)
 
+# WebSocket事件处理
+@socketio.on('connect')
+def handle_connect():
+    logger.info('客户端连接WebSocket')
+    emit('connected', {'status': 'connected'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    logger.info('客户端断开WebSocket连接')
+
+def clean_ai_response_for_tts(ai_text):
+    """清理AI回复文本，移除催收员前缀但保留所有内容"""
+    # 移除"催收员："前缀和编号，但保留所有内容作为连续文本
+    cleaned_text = re.sub(r'\d*\.?\s*催收员[：:]\s*', '', ai_text)
+    
+    # 清理多余的空白和换行
+    cleaned_text = ' '.join(cleaned_text.split())
+    
+    logger.info(f'AI回复清理: 原文长度={len(ai_text)}, 清理后长度={len(cleaned_text)}')
+    logger.info(f'清理后内容: "{cleaned_text[:100]}..."')
+    
+    return cleaned_text.strip()
+
+@socketio.on('chat_message')
+def handle_chat_message(data):
+    """处理聊天消息并流式返回连续音频"""
+    try:
+        message = data.get('message', '')
+        message_type = data.get('messageType', 'user')
+        customer_context = data.get('customerContext', {})
+        conversation_history = data.get('conversationHistory', [])
+        
+        logger.info(f'WebSocket收到消息: {message[:50]}... 类型: {message_type}')
+        
+        # 对于代理问候语，使用流式TTS
+        if message_type == 'agent_greeting':
+            logger.info('处理代理问候语，使用连续流式TTS')
+            generate_tts_audio_streaming(message, 0, 1)
+            return
+        
+        # 构建对话上下文
+        system_prompt = build_collection_prompt(customer_context, conversation_history, message)
+        
+        # 调用通义千问生成回复
+        ai_response, llm_latency = generate_ai_response(system_prompt)
+        
+        if not ai_response:
+            emit('error', {'error': '生成AI回复失败'})
+            return
+        
+        # 清理AI回复 - 移除"催收员："前缀但保留内容
+        cleaned_response = clean_ai_response_for_tts(ai_response)
+        
+        # 先发送完整文本用于显示
+        emit('text_response', {'text': cleaned_response})
+        
+        # 将整个回复作为单一连续音频流处理
+        logger.info(f'WebSocket连续流式处理完整回复: {cleaned_response[:50]}...')
+        tts_latency = generate_tts_audio_streaming(cleaned_response, 0, 1)
+        
+        if tts_latency is None or tts_latency <= 0:
+            logger.error('连续流式音频生成失败')
+            tts_latency = 0
+        
+        # 发送延迟指标到客户端
+        emit('latency_metrics', {
+            'llm_latency': llm_latency,
+            'tts_latency': tts_latency
+        })
+        
+        logger.info(f'WebSocket完成AI回复连续流式处理: {cleaned_response[:50]}... (LLM: {llm_latency}ms, TTS: {tts_latency}ms)')
+        
+    except Exception as e:
+        logger.error(f'WebSocket聊天处理错误: {str(e)}')
+        emit('error', {'error': f'处理失败: {str(e)}'})
+
 if __name__ == '__main__':
-    logger.info('启动AI催收助手Qwen服务器...')
+    logger.info('启动AI催收助手Qwen服务器 (WebSocket支持)...')
     logger.info(f'DashScope API Key: {"已设置" if DASHSCOPE_API_KEY else "未设置"}')
-    app.run(host='0.0.0.0', port=3003, debug=True)
+    socketio.run(app, host='0.0.0.0', port=3003, debug=True, allow_unsafe_werkzeug=True)
