@@ -434,7 +434,6 @@ def generate_tts_audio_streaming(text, segment_index=0, total_segments=1):
                 return False
             else:
                 logger.info(f'等待1秒后重试...')
-                import time
                 time.sleep(1)
 
 def generate_tts_audio(text):
@@ -480,7 +479,6 @@ def generate_tts_audio(text):
                 return []
             else:
                 logger.info(f'等待1秒后重试...')
-                import time
                 time.sleep(1)
 
 def recognize_speech_dashscope(audio_file):
@@ -685,7 +683,6 @@ def recognize_speech_dashscope(audio_file):
             
         finally:
             # 清理临时WebM文件
-            import time
             time.sleep(1)  # 给文件系统一点时间
             # try:
             #     if os.path.exists(webm_file_path):
