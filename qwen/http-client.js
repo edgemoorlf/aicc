@@ -466,6 +466,7 @@ class AICollectionAgent {
             this.isListening = false;
             this.isRecording = false;
             this.customerHasResponded = false; // 重置客户回应状态
+            this.customerHasResponded = false; // 重置客户回应状态
             
             // 设置会话 (无需连接延迟，服务器保持持久连接)
             this.setupSession();
@@ -741,6 +742,9 @@ class AICollectionAgent {
         // 记录客户停止说话的时间点
         this.customerStopTime = Date.now();
         
+        // 记录客户停止说话的时间点
+        this.customerStopTime = Date.now();
+        
         // 在持续监听模式下不关闭音频流
         if (!this.isListening && this.audioStream) {
             this.audioStream.getTracks().forEach(track => track.stop());
@@ -772,6 +776,12 @@ class AICollectionAgent {
         try {
             // 合并音频数据
             const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm;codecs=opus' });
+            
+            // 停止任何当前播放的音频
+            this.stopCurrentAudio();
+            
+            // 标记客户开始回应
+            this.customerHasResponded = true;
             
             // 停止任何当前播放的音频
             this.stopCurrentAudio();

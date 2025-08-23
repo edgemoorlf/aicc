@@ -493,6 +493,7 @@ def recognize_speech_dashscope(audio_file):
         logger.info(f'音频文件大小: {len(audio_content)} bytes')
         
         # 直接使用WebM格式进行ASR
+        # 直接使用WebM格式进行ASR
         import tempfile
         
         # 保存原始WebM文件
@@ -500,6 +501,7 @@ def recognize_speech_dashscope(audio_file):
             webm_file.write(audio_content)
             webm_file_path = webm_file.name
         
+        logger.info(f'WebM文件大小: {len(audio_content)} bytes location: {webm_file_path}')
         logger.info(f'WebM文件大小: {len(audio_content)} bytes location: {webm_file_path}')
         
         try:
@@ -515,7 +517,66 @@ def recognize_speech_dashscope(audio_file):
             
             result = recognition.call(webm_file_path)
             logger.info(f'8kHz WebM识别完成，状态: {getattr(result, "status_code", "未知")}')
+            logger.info('使用8kHz WebM直接识别...')
             
+            # 直接使用8k模型处理8kHz WebM
+            recognition = Recognition(
+                model='paraformer-realtime-8k-v2',
+                format='webm',
+                sample_rate=8000,  # 客户端现在生成8kHz WebM
+                callback=None
+            )
+            
+            result = recognition.call(webm_file_path)
+            logger.info(f'8kHz WebM识别完成，状态: {getattr(result, "status_code", "未知")}')
+            
+            # 检查8kHz WebM识别是否成功
+            if hasattr(result, 'get_sentence') and result.get_sentence():
+                sentences = result.get_sentence()
+                logger.info(f'8kHz WebM识别成功，识别到 {len(sentences)} 个句子')
+                
+                transcript_parts = []
+                for sentence_obj in sentences:
+                    if isinstance(sentence_obj, dict) and 'text' in sentence_obj:
+                        transcript_parts.append(sentence_obj['text'])
+                
+                transcript = ''.join(transcript_parts)
+                if transcript.strip():
+                    logger.info(f'8kHz WebM识别结果: {transcript}')
+                    return transcript.strip()
+            
+            elif hasattr(result, 'output') and result.output and hasattr(result.output, 'sentence') and result.output.sentence:
+                sentences = result.output.sentence
+                transcript_parts = []
+                for sentence_obj in sentences:
+                    if isinstance(sentence_obj, dict) and 'text' in sentence_obj:
+                        transcript_parts.append(sentence_obj['text'])
+                
+                transcript = ''.join(transcript_parts)
+                if transcript.strip():
+                    logger.info(f'8kHz WebM识别结果: {transcript}')
+                    return transcript.strip()
+            
+            logger.warning('8kHz WebM识别失败，回退到WAV转换')
+            
+        except Exception as webm_error:
+            logger.warning(f'8kHz WebM识别异常，回退到WAV转换: {str(webm_error)}')
+        
+        # 回退方案：转换为WAV
+        try:
+            logger.info('使用WebM转WAV + 8kHz模型进行ASR...')
+            
+            # 转换WebM到8kHz WAV
+            from pydub import AudioSegment
+            wav_file_path = webm_file_path.replace('.webm', '_8khz.wav')
+            
+            audio = AudioSegment.from_file(webm_file_path, format="webm")
+            audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+            audio.export(wav_file_path, format="wav")
+            
+            logger.info(f'WAV转换完成: {wav_file_path}')
+            
+            # 使用8kHz模型进行识别
             # 检查8kHz WebM识别是否成功
             if hasattr(result, 'get_sentence') and result.get_sentence():
                 sentences = result.get_sentence()
@@ -616,6 +677,7 @@ def recognize_speech_dashscope(audio_file):
             return None
             
         except Exception as e:
+            logger.error(f'WebM语音识别错误: {str(e)}')
             logger.error(f'WebM语音识别错误: {str(e)}')
             import traceback
             logger.error(f'错误详情: {traceback.format_exc()}')
