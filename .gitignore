@@ -215,3 +215,5 @@ tests/
 data/
 .vscode/
 test*
+.DS_Store
+*.log

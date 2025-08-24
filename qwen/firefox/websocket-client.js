@@ -1,6 +1,7 @@
 /**
- * AI催收助手 - WebSocket版本客户端
- * 支持流式音频分段传输，基于http-client.js完整功能
+ * AI催收助手 - Firefox OGG/Opus优化版本
+ * 支持直接OGG/Opus流式传输，零转换延迟
+ * 专为Firefox浏览器的原生OGG/Opus支持优化
  */
 
 class AICollectionAgentWS {
@@ -48,6 +49,7 @@ class AICollectionAgentWS {
         this.pcmChunkBuffer = new Map(); // 缓存乱序到达的PCM块
         this.expectedChunkIndex = 1; // 期望的下一个块索引
         this.currentSegmentIndex = -1; // 当前段落索引
+        this.activePCMSources = []; // 🔧 新增：跟踪所有活跃的PCM音频源
         
         // 延迟图表相关
         this.latencyChart = null;
@@ -75,9 +77,11 @@ class AICollectionAgentWS {
                              location.hostname.includes('.local');
         
         if (isDevelopment) {
-            return `http://${location.hostname}:3003`;
+            return `ws://${location.hostname}:3004`;
         } else {
-            return location.origin;
+            // Convert HTTP to WebSocket protocol
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${wsProtocol}//${location.host}`;
         }
     }
 
@@ -317,17 +321,27 @@ class AICollectionAgentWS {
             });
 
             this.socket.on('user_speech_recognized', (data) => {
-                // 用户语音识别完成，显示用户消息
+                // 🚨 关键：这是触发AI响应的唯一入口！
+                // 服务器端已完成句子完整性检测，确保不会重复响应
                 this.displayMessage('user', data.text);
-                this.debugLog(`用户语音识别: ${data.text}`);
+                this.debugLog(`✅ 完整句子识别完成: ${data.text} (方法: ${data.completion_method || 'unknown'})`);
                 
-                // 发送给AI处理
+                // 发送给AI处理 - 这是唯一应该触发AI响应的地方
                 this.sendRecognizedTextToAI(data.text);
+            });
+
+            this.socket.on('streaming_asr_started', (data) => {
+                this.currentASRSessionId = data.session_id;
+                this.debugLog(`流式ASR会话启动: ${data.session_id}`);
             });
 
             this.socket.on('asr_session_started', (data) => {
                 this.currentASRSessionId = data.session_id;
                 this.debugLog(`流式ASR会话启动: ${data.session_id}`);
+            });
+
+            this.socket.on('streaming_asr_error', (data) => {
+                this.debugLog(`流式ASR会话启动失败: ${data.error}`);
             });
 
             this.socket.on('asr_session_failed', (data) => {
@@ -378,6 +392,10 @@ class AICollectionAgentWS {
             // 计算多种延迟指标 - 第一个PCM块到达时计算
             if (data.chunk_index === 1 && data.segment_index === 0) {
                 const now = Date.now();
+                
+                // 🔧 关键修复：新的代理回复开始，停止任何之前的音频播放
+                this.stopCurrentAudio();
+                this.debugLog('🛑 新的代理回复开始，停止之前的音频');
                 
                 // 1. 真实流式延迟：从服务器请求到首个音频块
                 if (this.serverRequestStartTime) {
@@ -489,6 +507,9 @@ class AICollectionAgentWS {
             const source = this.audioContext.createBufferSource();
             source.buffer = audioBuffer;
             
+            // 🔧 跟踪音频源以便后续停止
+            this.activePCMSources.push(source);
+            
             // 创建增益节点用于音量控制
             if (!this.pcmGainNode) {
                 this.pcmGainNode = this.audioContext.createGain();
@@ -522,15 +543,19 @@ class AICollectionAgentWS {
                 this.debugLog('代理开始流式播放PCM音频');
             }
             
-            this.debugLog(`序列播放PCM: ${pcmData.length}字节, 时长: ${duration.toFixed(3)}s, 开始时间: ${startTime.toFixed(3)}s`);
+            this.debugLog(`序列播放PCM: ${pcmData.length}字节, 时长: ${duration.toFixed(3)}s, 开始时间: ${startTime.toFixed(3)}s, 活跃源: ${this.activePCMSources.length}`);
             
             // 标记正在播放
             this.isPlayingAudio = true;
             this.pcmIsPlaying = true;
             
-            // 设置播放结束回调
+            // 设置播放结束回调 - 从活跃源列表中移除
             source.onended = () => {
-                this.debugLog(`PCM块播放完成: 段落${data.segment_index + 1}, 块${data.chunk_index}`);
+                const index = this.activePCMSources.indexOf(source);
+                if (index > -1) {
+                    this.activePCMSources.splice(index, 1);
+                }
+                this.debugLog(`PCM块播放完成: 段落${data.segment_index + 1}, 块${data.chunk_index}, 剩余源: ${this.activePCMSources.length}`);
             };
             
         } catch (error) {
@@ -780,8 +805,8 @@ class AICollectionAgentWS {
         
         // Chrome/Firefox/Edge - 使用WebM/Opus格式 (73.4%市场覆盖)
         const formats = [
-            "audio/webm;codecs=opus",  // 首选 - 广泛支持且性能优秀
-            "audio/webm"               // 回退 - 基础格式兼容性
+            "audio/ogg;codecs=opus",   // 首选 - Firefox原生支持，零延迟
+            "audio/ogg"                // 回退 - OGG基础格式
         ];
         
         for (const format of formats) {
@@ -795,7 +820,7 @@ class AICollectionAgentWS {
         
         // 最后回退 - 基础WebM格式
         this.debugLog("回退到基础WebM格式");
-        return "audio/webm";
+        return "audio/ogg";
     }
 
     // 将数字转换为大陆标准中文表达
@@ -928,7 +953,8 @@ class AICollectionAgentWS {
             this.audioContext = this.audioContext || new AudioContextClass();
             const source = this.audioContext.createMediaStreamSource(this.audioStream);
             this.analyser = this.audioContext.createAnalyser();
-            this.analyser.fftSize = 256;
+            this.analyser.fftSize = 512;  // 🔧 增加FFT大小，提高频率分析精度
+            this.analyser.smoothingTimeConstant = 0.8;  // 🔧 平滑处理，减少噪音波动
             source.connect(this.analyser);
 
             this.isListening = true;
@@ -957,6 +983,9 @@ class AICollectionAgentWS {
         this.debugLog('正在停止持续监听...');
         this.isListening = false;
         
+        // 停止连续录音
+        this.stopContinuousRecording();
+        
         if (this.audioStream) {
             this.audioStream.getTracks().forEach(track => track.stop());
             this.audioStream = null;
@@ -968,74 +997,126 @@ class AICollectionAgentWS {
 
     // 语音活动检测
     startVoiceActivityDetection() {
+        // 🔧 电话模式：始终录音，让DashScope处理语音检测和句子分割
+        // 客户端只负责在人声时中断代理播放（电话礼貌）
+        
         const bufferLength = this.analyser.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
-        let speechDetected = false;
-        let speechStartTime = null;
-        let silenceStart = null;
 
         const detectVoice = () => {
             if (!this.isListening) return;
 
             this.analyser.getByteFrequencyData(dataArray);
             
-            // 计算音频能量
+            // 简单音量检测 - 只用于中断代理播放，不控制录音开关
             const average = dataArray.reduce((sum, value) => sum + value, 0) / bufferLength;
-            const threshold = 60; // 提高语音检测阈值，避免背景噪音 (原来是30)
+            const interruptThreshold = 40; // 降低阈值，任何人声都会中断代理
             
-            if (average > threshold) {
-                // 检测到语音
-                if (!speechDetected) {
-                    speechDetected = true;
-                    speechStartTime = Date.now();
-                    silenceStart = null;
-                    
-                    // 如果代理正在说话，立即停止
-                    if (this.isPlayingAudio) {
-                        this.stopCurrentAudio();
-                        this.debugLog('客户开始说话，中断代理音频');
-                    }
-                    
-                    this.startRecording();
-                    this.debugLog('检测到语音，开始录音');
-                }
-            } else {
-                // 静音状态
-                if (speechDetected && !silenceStart) {
-                    silenceStart = Date.now();
-                }
-                
-                // 静音超过2秒，停止录音（增加到2秒避免过早停止）
-                if (speechDetected && silenceStart && Date.now() - silenceStart > 2000) {
-                    const speechDuration = Date.now() - speechStartTime;
-                    
-                    // 只处理超过800ms的语音（过滤掉很短的噪音）
-                    if (speechDuration >= 800) {
-                        speechDetected = false;
-                        silenceStart = null;
-                        speechStartTime = null;
-                        this.stopRecording();
-                        this.debugLog(`检测到静音，语音持续${speechDuration}ms，停止录音`);
-                    } else {
-                        // 语音太短，忽略
-                        speechDetected = false;
-                        silenceStart = null;
-                        speechStartTime = null;
-                        this.debugLog(`语音过短(${speechDuration}ms)，忽略录音`);
-                        if (this.isRecording) {
-                            this.mediaRecorder.stop();
-                            this.isRecording = false;
-                            this.audioChunks = []; // 清空音频数据
-                        }
-                    }
+            if (average > interruptThreshold) {
+                // 如果代理正在说话，立即停止（电话礼貌：客户说话时代理停止）
+                if (this.isPlayingAudio) {
+                    this.stopCurrentAudio();
+                    this.debugLog(`客户开始说话(音量: ${average.toFixed(1)})，中断代理音频`);
                 }
             }
             
-            // 继续检测
             requestAnimationFrame(detectVoice);
         };
 
+        // 🔧 电话模式：立即开始连续录音，让DashScope ASR处理一切
+        this.startContinuousRecording();
         detectVoice();
+    }
+
+    // 电话模式：持续录音并实时发送到DashScope ASR
+    async startContinuousRecording() {
+        if (this.isRecording) {
+            this.debugLog('连续录音已在运行，跳过重复启动');
+            return;
+        }
+
+        try {
+            this.debugLog('🎙️ 启动电话模式连续录音...');
+            
+            // 创建MediaRecorder用于连续录音 - 使用OGG/Opus格式
+            const mimeType = this.getBestMediaRecorderFormat();
+            this.mediaRecorder = new MediaRecorder(this.audioStream, {
+                mimeType: mimeType,
+                audioBitsPerSecond: 16000  // 16kbps适合语音
+            });
+
+            this.isRecording = true;
+            this.audioChunks = [];
+            
+            // 设置数据处理 - 每100ms获取一次音频数据
+            this.mediaRecorder.ondataavailable = async (event) => {
+                
+                if (event.data.size > 0) {
+                    this.debugLog(`📊 MediaRecorder数据块: ${event.data.size} bytes, Type: ${event.data.type}`);
+                    // 检查ASR会话是否已就绪，如果没有则等待
+                    if (!this.currentASRSessionId && this.isStreamingASRActive) {
+                        this.debugLog('⏳ 等待ASR会话建立...');
+                        // 等待最多500ms让ASR会话建立
+                        let waitCount = 0;
+                        while (!this.currentASRSessionId && waitCount < 5) {
+                            await new Promise(resolve => setTimeout(resolve, 100));
+                            waitCount++;
+                        }
+                    }
+                    
+                    if (this.currentASRSessionId) {
+                        // 立即发送OGG/Opus数据到服务器ASR
+                        try {
+                            const arrayBuffer = await event.data.arrayBuffer();
+                            const opusData = new Uint8Array(arrayBuffer);
+                            
+                            // 直接发送到DashScope ASR（零转换延迟）
+                            this.socket.emit('send_opus_chunk', {
+                                session_id: this.currentASRSessionId,
+                                opus_data: Array.from(opusData)
+                            });
+                            
+                            this.debugLog(`📤 发送连续OGG/Opus块: ${opusData.length} bytes`);
+                        } catch (error) {
+                            this.debugLog(`发送连续音频块失败: ${error.message}`);
+                        }
+                    } else {
+                        this.debugLog('⚠️ ASR会话未建立，跳过音频块');
+                    }
+                } else {
+                    // this.debugLog('⚠️ 接收到空音频块');
+                }
+            };
+
+            this.mediaRecorder.onerror = (event) => {
+                this.debugLog(`MediaRecorder错误: ${event.error}`);
+            };
+
+            this.mediaRecorder.onstop = () => {
+                this.debugLog('连续录音已停止');
+                this.isRecording = false;
+            };
+
+            // 启动连续录音 - 每100ms发送一个数据块
+            this.mediaRecorder.start(100); // 100ms时间片
+            
+            this.debugLog('✅ 电话模式连续录音已启动 (100ms时间片)');
+            this.debugLog(`🎤 MediaRecorder状态: ${this.mediaRecorder.state}, MimeType: ${mimeType}`);
+            this.debugLog(`📡 ASR会话状态: StreamingActive=${this.isStreamingASRActive}, SessionId=${this.currentASRSessionId || 'pending'}`);
+            
+        } catch (error) {
+            this.debugLog(`连续录音启动失败: ${error.message}`);
+            this.isRecording = false;
+        }
+    }
+
+    // 停止连续录音
+    stopContinuousRecording() {
+        if (this.isRecording && this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+            this.mediaRecorder.stop();
+            this.debugLog('🛑 连续录音已停止');
+        }
+        this.isRecording = false;
     }
 
     // 更新监听UI
@@ -1071,7 +1152,8 @@ class AICollectionAgentWS {
             // 创建MediaRecorder - 使用优化的格式检测
             const mimeType = this.getBestMediaRecorderFormat();
             this.mediaRecorder = new MediaRecorder(this.audioStream, {
-                mimeType: mimeType
+                mimeType: mimeType,
+                audioBitsPerSecond: 16000  // 16kbps for speech, forces lower sample rate
             });
 
             this.audioChunks = [];
@@ -1160,7 +1242,7 @@ class AICollectionAgentWS {
         // 原有的批处理ASR逻辑（作为备用）
         try {
             // 合并音频数据 - 现在是WebM/Opus格式
-            const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm;codecs=opus' });
+            const audioBlob = new Blob(this.audioChunks, { type: 'audio/ogg;codecs=opus' });
             
             // 停止任何当前播放的音频
             this.stopCurrentAudio();
@@ -1305,34 +1387,46 @@ class AICollectionAgentWS {
     }
     
     handleStreamingASRResult(data) {
-        // 处理流式ASR识别结果
+        // 🔧 修复：asr_result事件仅用于显示实时识别结果，不触发AI响应
+        // AI响应只通过 user_speech_recognized 事件触发（服务器端已处理句子完整性检测）
+        
+        if (data == undefined || (!data.result && !data.text)) {
+            this.debugLog('收到无效的ASR结果');
+            return;
+        }
+        
         try {
-            const result = data.result;
-            const elapsed = data.elapsed_ms;
+            // 处理新格式的ASR结果（直接包含text等字段）
+            const text = data.text || '';
+            const confidence = data.confidence || 0;
+            const isPartial = data.is_partial || false;
+            const isFinal = data.is_final || false;
+            const latency = data.latency_ms || 0;
             
-            this.debugLog(`流式ASR结果 (${elapsed}ms): ${JSON.stringify(result)}`);
-            
-            // 保存结果
-            this.streamingASRResults.push(result);
-            
-            // 提取文本内容
-            if (result.output && result.output.sentence) {
-                const sentence = result.output.sentence;
-                const text = sentence.text || '';
-                const isComplete = sentence.sentence_end || false;
+            if (text) {
+                this.debugLog(`🎙️ ASR实时结果: "${text}" (置信度: ${confidence.toFixed(2)}, ${isFinal ? '最终' : '部分'}, ${latency}ms)`);
                 
-                if (text) {
-                    this.debugLog(`ASR识别文本: "${text}" (${isComplete ? '完整' : '部分'})`);
-                    
-                    // 可以在这里实时显示部分识别结果
-                    if (isComplete) {
-                        this.debugLog(`完整句子识别: ${text}`);
-                    }
+                // 保存结果用于调试和指标
+                this.streamingASRResults.push({
+                    text: text,
+                    confidence: confidence,
+                    is_final: isFinal,
+                    timestamp: Date.now(),
+                    latency_ms: latency
+                });
+                
+                // 更新ASR延迟指标
+                if (latency > 0) {
+                    this.updateASRLatencyMetrics(latency);
                 }
+                
+                // 🚨 关键：不在这里触发AI响应！
+                // AI响应仅通过 user_speech_recognized 事件触发，
+                // 该事件已由服务器端的句子完整性检测逻辑处理
             }
             
         } catch (error) {
-            console.error('处理流式ASR结果失败:', error);
+            console.error('处理ASR结果失败:', error);
             this.debugLog('处理ASR结果失败: ' + error.message);
         }
     }
@@ -1458,19 +1552,46 @@ class AICollectionAgentWS {
             // Send the recorded OGG/Opus audio to speech recognition service
             // The server can then use DashScope ASR for transcription
             
-            const formData = new FormData();
-            formData.append('audio', audioBlob, 'recording.webm');  // 🔄 现在是WebM格式
-            
-            const response = await fetch(`${this.serverUrl}/api/transcribe`, {
-                method: 'POST',
-                body: formData
+            // Firefox优化：使用WebSocket进行转录，消除HTTP开销
+            const promise = new Promise((resolve, reject) => {
+                // 转换音频为Base64
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const audioBase64 = reader.result.split(',')[1];
+                    
+                    // 发送音频数据通过WebSocket
+                    this.socket.emit('transcribe_audio', {
+                        audio: audioBase64,
+                        format: 'ogg/opus'
+                    });
+                    
+                    // 监听转录结果
+                    const handleTranscribeResult = (data) => {
+                        this.socket.off('transcribe_result', handleTranscribeResult);
+                        this.socket.off('transcribe_error', handleTranscribeError);
+                        resolve(data);
+                    };
+                    
+                    const handleTranscribeError = (error) => {
+                        this.socket.off('transcribe_result', handleTranscribeResult);
+                        this.socket.off('transcribe_error', handleTranscribeError);
+                        reject(new Error(error.message || '转录失败'));
+                    };
+                    
+                    this.socket.on('transcribe_result', handleTranscribeResult);
+                    this.socket.on('transcribe_error', handleTranscribeError);
+                    
+                    // 超时处理
+                    setTimeout(() => {
+                        this.socket.off('transcribe_result', handleTranscribeResult);
+                        this.socket.off('transcribe_error', handleTranscribeError);
+                        reject(new Error('转录超时'));
+                    }, 10000);
+                };
+                reader.readAsDataURL(audioBlob);
             });
             
-            if (!response.ok) {
-                throw new Error(`Transcription failed: ${response.status}`);
-            }
-            
-            const result = await response.json();
+            const result = await promise;
             const transcript = result.transcript;
             
             // 过滤无关内容
@@ -1648,19 +1769,48 @@ class AICollectionAgentWS {
 
     // 停止当前播放的音频
     stopCurrentAudio() {
+        this.debugLog(`🛑 停止所有音频播放... (活跃PCM源: ${this.activePCMSources.length})`);
+        
         // 停止传统音频播放
         if (this.currentAudio && !this.currentAudio.paused) {
             this.currentAudio.pause();
             this.currentAudio.currentTime = 0;
-            this.debugLog('停止当前播放的音频');
+            this.debugLog('停止传统音频播放');
         }
         
-        // 停止流式PCM播放
+        // 🔧 关键修复：停止所有活跃的PCM音频源
+        if (this.activePCMSources.length > 0) {
+            this.activePCMSources.forEach((source, index) => {
+                try {
+                    source.stop();
+                    source.disconnect();
+                    this.debugLog(`停止PCM音频源 ${index + 1}`);
+                } catch (error) {
+                    // 音频源可能已经结束，忽略错误
+                    this.debugLog(`PCM音频源 ${index + 1} 已停止: ${error.message}`);
+                }
+            });
+            this.activePCMSources = []; // 清空源列表
+        }
+        
+        // 停止流式PCM播放状态
         if (this.pcmIsPlaying) {
             // 重置PCM播放时间戳，停止后续PCM块的播放
             this.pcmNextStartTime = 0;
             this.pcmIsPlaying = false;
-            this.debugLog('停止PCM流式音频播放');
+            this.debugLog('重置PCM流式播放状态');
+        }
+        
+        // 如果有Web Audio API上下文，断开增益节点
+        if (this.audioContext && this.pcmGainNode) {
+            try {
+                // 断开增益节点连接但不销毁，因为后续还需要使用
+                this.pcmGainNode.disconnect();
+                this.pcmGainNode = null;
+                this.debugLog('断开PCM增益节点');
+            } catch (error) {
+                this.debugLog(`断开PCM增益节点时出错: ${error.message}`);
+            }
         }
         
         // 清空PCM缓存和重置序列状态
