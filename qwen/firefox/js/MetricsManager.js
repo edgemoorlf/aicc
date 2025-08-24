@@ -168,6 +168,26 @@ class MetricsManager {
     }
 
     // 延迟指标更新方法
+    updateLLMLatencyMetrics(llmLatency) {
+        this.metrics.llmLatency.push({
+            latency: llmLatency,
+            timestamp: Date.now()
+        });
+        
+        this.updateElementText('llm-latency', llmLatency + ' ms');
+        this.debugLog(`LLM延迟更新: ${llmLatency}ms`);
+    }
+
+    updateTTSLatencyMetrics(ttsLatency) {
+        this.metrics.ttsLatency.push({
+            latency: ttsLatency,
+            timestamp: Date.now()
+        });
+        
+        this.updateElementText('tts-latency', ttsLatency + ' ms');
+        this.debugLog(`TTS延迟更新: ${ttsLatency}ms`);
+    }
+
     updateASRLatencyMetrics(asrLatency) {
         this.metrics.asrLatency.push({
             latency: asrLatency,

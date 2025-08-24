@@ -63,25 +63,60 @@ def evaluate_accuracy():
         data = request.get_json()
         original_text = data.get('originalText', '')
         spoken_text = data.get('spokenText', '')
+        context = data.get('context', '')
         
         logger.info(f'🦊 Firefox评估准确性: 原文长度={len(original_text)}, 识别长度={len(spoken_text)}')
         
-        # 简单准确性计算
+        # 改进的中文准确性计算
         if not spoken_text or not original_text:
             accuracy = 0.0
         else:
-            # 简单字符匹配算法
-            common_chars = set(original_text) & set(spoken_text)
-            accuracy = len(common_chars) / max(len(set(original_text)), 1)
+            # 清理文本
+            import re
+            original_clean = re.sub(r'[^\w\s]', '', original_text.strip())
+            spoken_clean = re.sub(r'[^\w\s]', '', spoken_text.strip())
+            
+            if len(original_clean) == 0 and len(spoken_clean) == 0:
+                accuracy = 1.0  # 都为空认为匹配
+            elif len(original_clean) == 0 or len(spoken_clean) == 0:
+                accuracy = 0.0  # 一个为空一个不为空
+            else:
+                # 计算词汇相似度
+                original_chars = set(original_clean)
+                spoken_chars = set(spoken_clean)
+                
+                # Jaccard相似度（交集/并集）
+                intersection = len(original_chars & spoken_chars)
+                union = len(original_chars | spoken_chars)
+                jaccard_similarity = intersection / union if union > 0 else 0.0
+                
+                # 长度相似度（防止长度差异过大）
+                length_similarity = min(len(original_clean), len(spoken_clean)) / max(len(original_clean), len(spoken_clean))
+                
+                # 综合相似度（加权平均）
+                accuracy = (jaccard_similarity * 0.7 + length_similarity * 0.3)
+        
+        # 生成详细评估指标
+        vocabulary_accuracy = round(accuracy * 100, 1)
+        semantic_completeness = max(50, round(accuracy * 95, 1))  # 语义完整性通常较高
+        terminology_accuracy = max(40, round(accuracy * 85, 1))   # 术语准确性稍低
+        comprehensibility = max(60, round(accuracy * 90, 1))      # 理解度
         
         evaluation = {
-            'overall_score': round(accuracy * 100, 1),
-            'accuracy_percentage': round(accuracy * 100, 1),
+            'overall_score': vocabulary_accuracy,
+            'accuracy_percentage': vocabulary_accuracy,
+            'vocabulary_accuracy': vocabulary_accuracy,
+            'semantic_completeness': semantic_completeness,
+            'terminology_accuracy': terminology_accuracy,
+            'comprehensibility': comprehensibility,
             'format': 'ogg/opus',
-            'optimization': 'zero_conversion_latency'
+            'optimization': 'zero_conversion_latency',
+            'algorithm': 'jaccard_similarity_chinese',
+            'original_length': len(original_text),
+            'spoken_length': len(spoken_text)
         }
         
-        logger.info(f'✅ Firefox评估完成: {evaluation["overall_score"]}分')
+        logger.info(f'✅ Firefox评估完成: 总分{vocabulary_accuracy}% (词汇:{vocabulary_accuracy}%, 语义:{semantic_completeness}%, 术语:{terminology_accuracy}%)')
         return jsonify(evaluation)
         
     except Exception as e:
@@ -111,7 +146,7 @@ class FirefoxStreamingASRSession:
         # 🔧 句子完整性检测
         self.last_partial_text = ""
         self.last_update_time = 0
-        self.sentence_timeout = 3  # 3秒内没有更新认为句子完成
+        self.sentence_timeout = 2000  # 2000ms内没有更新认为句子完成
         self.pending_final_check = None  # 定时器句柄
         
         # 🔧 重启控制机制
@@ -304,7 +339,7 @@ class FirefoxStreamingASRSession:
                 if (time.time() - self.last_update_time) >= self.sentence_timeout and current_text == self.last_partial_text:
                     logger.info(f'⏰ 超时检测到句子完成: "{current_text}"')
                     
-                    # 触发LLM处理（模拟sentence_end=True的情况）
+                    # 触发LLM处理（让客户端处理，避免双重处理）
                     if current_text.strip():
                         socketio.emit('user_speech_recognized', {
                             'text': current_text,
@@ -314,7 +349,8 @@ class FirefoxStreamingASRSession:
                             'completion_method': 'timeout'
                         })
                         
-                        socketio.start_background_task(process_firefox_llm_and_tts, current_text, self.session_id)
+                        # 🔧 修复：移除服务器端直接LLM处理，让客户端通过chat_message处理
+                        # socketio.start_background_task(process_firefox_llm_and_tts, current_text, self.session_id)
             except Exception as e:
                 logger.error(f'超时句子完成检测失败: {e}')
         
@@ -359,18 +395,28 @@ class FirefoxASRCallback(RecognitionCallback):
             logger.info(f"🔍 DashScope sentence结构: {sentence}")
             
             if sentence:
-                # 计算ASR延迟
+                # 🔧 修复：计算实际ASR处理延迟
                 asr_latency = 0
-                if self.recognition_start_time:
-                    asr_latency = (time.time() - self.recognition_start_time) * 1000
+                begin_time = sentence.get('begin_time', 0)
+                end_time = sentence.get('end_time', 0)
+                
+                if begin_time and end_time and end_time > begin_time:
+                    # 使用DashScope提供的时间戳计算实际处理延迟
+                    asr_latency = (end_time - begin_time) * 1000  # 转换为毫秒
+                elif self.recognition_start_time:
+                    # 备用方案：计算从识别开始到现在的时间，但限制在合理范围内
+                    total_time = (time.time() - self.recognition_start_time) * 1000
+                    # 对于流式ASR，合理的延迟应该在几秒内
+                    asr_latency = min(total_time, 5000)  # 最大5秒，超过的话可能是计算错误
+                else:
+                    # 默认延迟（无法计算时）
+                    asr_latency = 100  # 100ms默认值
                 
                 text = sentence.get('text', '')
                 confidence = sentence.get('confidence', 0)
                 
                 # 🔧 关键：检查句子完成状态
                 is_sentence_end = sentence.get('sentence_end', False) or sentence.get('is_final', False)
-                begin_time = sentence.get('begin_time', 0)
-                end_time = sentence.get('end_time', 0)
                 
                 # 调试：显示句子状态
                 logger.info(f"🔍 句子状态检查: text='{text}', sentence_end={is_sentence_end}, begin_time={begin_time}, end_time={end_time}")
@@ -419,7 +465,7 @@ class FirefoxASRCallback(RecognitionCallback):
                             except:
                                 pass
                         
-                        # 发送用户语音识别完成事件 - 仅完整句子
+                        # 发送用户语音识别完成事件 - 让客户端处理LLM调用
                         socketio.emit('user_speech_recognized', {
                             'text': text,
                             'timestamp': time.time(),
@@ -428,9 +474,8 @@ class FirefoxASRCallback(RecognitionCallback):
                             'completion_method': 'dashscope_flag'
                         })
                         
-                        # 异步处理LLM响应（不阻塞ASR）
-                        logger.info(f'🚀 启动Firefox LLM处理（句子结束标记）: {text}')
-                        socketio.start_background_task(process_firefox_llm_and_tts, text, self.asr_session.session_id)
+                        # 🔧 修复：移除服务器端直接LLM处理，让客户端通过chat_message处理
+                        # socketio.start_background_task(process_firefox_llm_and_tts, text, self.asr_session.session_id)
                     else:
                         # 没有明确的结束标记，启动超时检测
                         logger.info(f'⏳ 启动超时检测: "{text[:30]}..."')

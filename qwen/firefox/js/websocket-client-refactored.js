@@ -36,6 +36,14 @@ class AICollectionAgentWS {
         this.isStreamingASRActive = false;
         this.streamingASRResults = [];
         
+        // 准确性评估相关
+        this.lastAgentMessage = null;        // 最后一次代理消息，用于准确性评估
+        this.accuracyEvaluationEnabled = true; // 是否启用准确性评估
+        
+        // 🔧 修复：端到端延迟计算时间点
+        this.customerStopTime = null;        // 客户停止说话时间
+        this.customerStopToLLMTime = null;    // LLM处理延迟
+        
         // 初始化应用
         this.init();
     }
@@ -153,12 +161,22 @@ class AICollectionAgentWS {
             this.uiManager.updateConnectionStatus(data.status, data.message);
         });
 
-        // 文本响应
+        // 🔧 修复：合并text_response处理 - LLM响应和延迟指标  
         this.webSocketManager.on('text_response', (data) => {
             this.uiManager.displayMessage('assistant', data.text);
+            this.debugLog(`LLM响应完成: ${data.text.substring(0, 30)}... (延迟: ${data.latency_ms}ms)`);
+            
+            // 更新LLM延迟指标
+            this.metricsManager.updateLLMLatencyMetrics(data.latency_ms);
+            
+            // 记录LLM完成时间，用于计算端到端延迟
+            this.customerStopToLLMTime = data.latency_ms;
+            
+            // 保存代理消息用于准确性评估
+            this.lastAgentMessage = data.text;
         });
 
-        // 延迟指标
+        // 延迟指标 - 保留用于兼容性
         this.webSocketManager.on('latency_metrics', (data) => {
             this.metricsManager.updateServerLatencyMetrics(data.llm_latency, data.tts_latency);
         });
@@ -168,14 +186,44 @@ class AICollectionAgentWS {
             await this.audioManager.playPCMChunkDirectly(data);
         });
 
-        // PCM段落结束
+        // 🔧 修复：PCM段落结束 - 添加TTS延迟指标和端到端计算
         this.webSocketManager.on('pcm_segment_end', (data) => {
-            this.debugLog(`PCM段落结束，共 ${data.chunk_count} 个数据块`);
+            this.debugLog(`PCM段落结束，共 ${data.chunk_count} 个数据块，TTS延迟: ${data.latency_ms}ms`);
+            
+            // 更新TTS延迟指标
+            if (data.latency_ms) {
+                this.metricsManager.updateTTSLatencyMetrics(data.latency_ms);
+            }
+            
+            // 计算端到端延迟（从客户停止说话到代理开始播放音频）
+            if (this.customerStopTime && this.customerStopToLLMTime) {
+                const endToEndLatency = (Date.now() - this.customerStopTime);
+                this.metricsManager.updateLatencyMetrics(endToEndLatency);
+                this.debugLog(`端到端延迟: ${endToEndLatency}ms (客户停止 -> 代理开始播放)`);
+                
+                // 重置计时器
+                this.customerStopTime = null;
+                this.customerStopToLLMTime = null;
+            }
         });
 
         // 用户语音识别完成 - 唯一触发AI响应的入口
         this.webSocketManager.on('user_speech_recognized', (data) => {
             this.uiManager.displayMessage('user', data.text);
+            
+            // 🔧 修复：记录客户停止说话时间，用于端到端延迟计算
+            this.customerStopTime = data.timestamp ? new Date(data.timestamp * 1000).getTime() : Date.now();
+            this.debugLog(`客户停止说话时间记录: ${this.customerStopTime}`);
+            
+            // 准确性评估 - 评估ASR准确性（仅在有参考文本时）
+            if (this.accuracyEvaluationEnabled && this.lastAgentMessage && data.text) {
+                // 启动准确性评估（异步，不阻塞主流程）
+                this.evaluateTranscriptAccuracy(this.lastAgentMessage, data.text)
+                    .catch(error => {
+                        this.debugLog(`准确性评估异常: ${error.message}`);
+                    });
+            }
+            
             this.sendRecognizedTextToAI(data.text);
         });
 
@@ -338,6 +386,9 @@ class AICollectionAgentWS {
         // 重置管理器状态
         this.metricsManager.resetMetrics();
         this.uiManager.resetUI();
+        
+        // 重置准确性评估状态
+        this.lastAgentMessage = null;
         
         this.currentCustomer = null;
         this.debugLog('WebSocket会话已重置');
@@ -618,6 +669,9 @@ class AICollectionAgentWS {
             // 显示完整文本
             this.uiManager.displayMessage('assistant', fullGreeting);
             
+            // 保存代理消息用于准确性评估
+            this.lastAgentMessage = fullGreeting;
+            
             // 通过WebSocket生成并播放单一连续音频流
             this.webSocketManager.sendChatMessage({
                 message: fullGreeting,
@@ -637,6 +691,9 @@ class AICollectionAgentWS {
         try {
             const testMessage = '你好，这是一个测试消息。请确认你能听到清晰的中文语音。';
             
+            // 保存测试消息用于准确性评估
+            this.lastAgentMessage = testMessage;
+            
             this.webSocketManager.sendChatMessage({
                 message: testMessage,
                 messageType: 'agent_greeting'
@@ -648,6 +705,55 @@ class AICollectionAgentWS {
             console.error('音频测试失败:', error);
             this.debugLog('音频测试失败: ' + error.message);
         }
+    }
+
+    // 准确性评估
+    async evaluateTranscriptAccuracy(originalText, spokenText) {
+        try {
+            this.debugLog('开始评估转录准确性...');
+            
+            const serverUrl = this.getServerUrl().replace('ws://', 'http://').replace('wss://', 'https://');
+            const response = await fetch(`${serverUrl}/api/evaluate-accuracy`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    originalText: originalText,
+                    spokenText: spokenText,
+                    context: `银行催收对话，客户: ${this.currentCustomer?.name}, 场景: ${this.currentScenario}`
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP错误: ${response.status}`);
+            }
+
+            const evaluation = await response.json();
+            
+            if (evaluation.error) {
+                throw new Error(evaluation.error);
+            }
+
+            // 直接使用服务器返回的详细评估结果
+            this.metricsManager.updateAccuracyMetrics(evaluation);
+            
+            this.debugLog(`准确性评估完成: ${evaluation.vocabulary_accuracy}% (${evaluation.algorithm || 'unknown'}算法)`);
+            
+            return evaluation;
+            
+        } catch (error) {
+            console.error('准确性评估失败:', error);
+            this.debugLog('准确性评估失败: ' + error.message);
+            return null;
+        }
+    }
+
+    getAccuracyGrade(percentage) {
+        if (percentage >= 90) return '优秀';
+        if (percentage >= 75) return '良好';
+        if (percentage >= 60) return '可接受';
+        return '需改进';
     }
 
     // 获取应用状态
