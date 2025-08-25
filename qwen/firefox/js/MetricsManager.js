@@ -185,7 +185,7 @@ class MetricsManager {
         });
         
         this.updateElementText('tts-latency', ttsLatency + ' ms');
-        this.debugLog(`TTS延迟更新: ${ttsLatency}ms`);
+        this.debugLog(`TTS首块延迟: ${ttsLatency}ms (文本→首个音频)`);
     }
 
     updateASRLatencyMetrics(asrLatency) {
@@ -195,7 +195,7 @@ class MetricsManager {
         });
         
         this.updateElementText('asr-latency', asrLatency + ' ms');
-        this.debugLog(`ASR延迟记录: ${asrLatency}ms`);
+        this.debugLog(`ASR处理延迟: ${asrLatency}ms (停止说话→识别完成)`);
     }
 
     updateServerLatencyMetrics(llmLatency, ttsLatency) {

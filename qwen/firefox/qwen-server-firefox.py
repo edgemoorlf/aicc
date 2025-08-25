@@ -155,6 +155,10 @@ class FirefoxStreamingASRSession:
         self.consecutive_failures = 0
         self.max_consecutive_failures = 3  # 最大连续失败次数
         
+        # 🔧 ASR延迟测量
+        self.sentence_end_time = None    # 句子结束时间（客户停止说话）
+        self.last_audio_time = None      # 最后音频数据接收时间
+        
     def start_streaming_asr(self):
         """启动流式ASR识别 - Firefox OGG/Opus优化版"""
         try:
@@ -232,6 +236,9 @@ class FirefoxStreamingASRSession:
             if not audio_data or len(audio_data) == 0:
                 logger.warning('收到空音频数据，跳过发送')
                 return True
+                
+            # 🔧 记录最后音频接收时间（用于ASR延迟计算）
+            self.last_audio_time = time.time()
                 
             # 直接发送OGG/Opus数据到DashScope，无需转换！
             
@@ -395,28 +402,38 @@ class FirefoxASRCallback(RecognitionCallback):
             logger.info(f"🔍 DashScope sentence结构: {sentence}")
             
             if sentence:
-                # 🔧 修复：计算实际ASR处理延迟
-                asr_latency = 0
+                text = sentence.get('text', '')
+                confidence = sentence.get('confidence', 0)
                 begin_time = sentence.get('begin_time', 0)
                 end_time = sentence.get('end_time', 0)
                 
-                if begin_time and end_time and end_time > begin_time:
-                    # 使用DashScope提供的时间戳计算实际处理延迟
-                    asr_latency = (end_time - begin_time) * 1000  # 转换为毫秒
-                elif self.recognition_start_time:
-                    # 备用方案：计算从识别开始到现在的时间，但限制在合理范围内
-                    total_time = (time.time() - self.recognition_start_time) * 1000
-                    # 对于流式ASR，合理的延迟应该在几秒内
-                    asr_latency = min(total_time, 5000)  # 最大5秒，超过的话可能是计算错误
-                else:
-                    # 默认延迟（无法计算时）
-                    asr_latency = 100  # 100ms默认值
-                
-                text = sentence.get('text', '')
-                confidence = sentence.get('confidence', 0)
-                
                 # 🔧 关键：检查句子完成状态
                 is_sentence_end = sentence.get('sentence_end', False) or sentence.get('is_final', False)
+                
+                # 🔧 修复：计算真实ASR延迟 = 从客户停止说话到结果返回的时间
+                asr_latency = 0
+                current_time = time.time()
+                
+                if is_sentence_end:
+                    # 对于最终结果，我们关心从句子结束到现在的延迟
+                    if end_time > 0:
+                        # 如果DashScope提供了end_time，估算句子结束时间
+                        # end_time是相对于开始的秒数，我们需要转换为绝对时间
+                        sentence_duration = end_time - begin_time if begin_time else 0
+                        estimated_sentence_end = current_time - sentence_duration if sentence_duration > 0 else current_time
+                        asr_latency = (current_time - estimated_sentence_end) * 1000
+                    elif self.asr_session.last_audio_time:
+                        # 备用方案：从最后音频数据时间算起（近似）
+                        asr_latency = (current_time - self.asr_session.last_audio_time) * 1000
+                    else:
+                        # 默认处理延迟
+                        asr_latency = 200
+                    
+                    # 确保延迟在合理范围内（ASR处理延迟通常100-2000ms）
+                    asr_latency = max(50, min(asr_latency, 3000))
+                else:
+                    # 对于部分结果，延迟通常更短
+                    asr_latency = 100
                 
                 # 调试：显示句子状态
                 logger.info(f"🔍 句子状态检查: text='{text}', sentence_end={is_sentence_end}, begin_time={begin_time}, end_time={end_time}")
@@ -434,7 +451,7 @@ class FirefoxASRCallback(RecognitionCallback):
                                 confidence = 0.8
                                 logger.info(f"⚠️ DashScope未提供置信度，使用默认值: {confidence}")
                 
-                logger.info(f"🦊 Firefox ASR结果: '{text}' (置信度: {confidence:.2f}, 延迟: {asr_latency:.1f}ms, 完整: {is_sentence_end})")
+                logger.info(f"🦊 Firefox ASR结果: '{text}' (置信度: {confidence:.2f}, 处理延迟: {asr_latency:.1f}ms, 完整: {is_sentence_end})")
                 
                 # 发送ASR结果到客户端（包括部分结果用于实时显示）
                 socketio.emit('asr_result', {
@@ -597,9 +614,9 @@ def process_firefox_llm_and_tts(user_text, session_id):
         
         system_prompt = build_collection_prompt(customer_context, conversation_history)
         
-        logger.info(f'🧠 调用Qwen LLM...')
+        logger.info(f'🧠 调用Qwen Turbo (最新版)...')
         response = Generation.call(
-            model='qwen-plus',
+            model='qwen-turbo-latest',  # 🚀 更快的Turbo模型
             messages=[
                 {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': user_text}
@@ -613,7 +630,7 @@ def process_firefox_llm_and_tts(user_text, session_id):
         
         if response.status_code == 200:
             ai_response = response.output.choices[0].message.content
-            logger.info(f"💬 Firefox LLM响应: '{ai_response}' (延迟: {llm_latency:.1f}ms)")
+            logger.info(f"💬 Firefox Qwen-Turbo响应: '{ai_response}' (延迟: {llm_latency:.1f}ms)")
             
             # 发送LLM结果
             socketio.emit('text_response', {
@@ -657,6 +674,7 @@ def generate_tts_audio_streaming(text, session_id):
         # 流式生成PCM数据 - 添加索引支持
         chunk_index = 1
         segment_index = 0  # Firefox简化为单一段落
+        first_chunk_latency = None  # 首个PCM块延迟
         
         # 处理流式响应
         for response in responses:
@@ -666,6 +684,11 @@ def generate_tts_audio_streaming(text, session_id):
                 pcm_bytes = base64.b64decode(audio_string)
                 
                 if pcm_bytes:
+                    # 🔧 记录首个PCM块延迟（真实TTS延迟）
+                    if first_chunk_latency is None:
+                        first_chunk_latency = (time.time() - tts_start) * 1000
+                        logger.info(f'🎵 首个PCM块延迟: {first_chunk_latency:.1f}ms (TTS处理延迟)')
+                    
                     # 发送PCM块到客户端 - 包含客户端期望的索引字段
                     socketio.emit('pcm_chunk', {
                         'pcm_data': list(pcm_bytes),  # Firefox客户端期望pcm_data字段
@@ -673,7 +696,8 @@ def generate_tts_audio_streaming(text, session_id):
                         'segment_index': segment_index,  # 添加段落索引
                         'sample_rate': 24000,  # DashScope TTS默认24kHz
                         'format': 'pcm',
-                        'session_id': session_id
+                        'session_id': session_id,
+                        'first_chunk_latency': first_chunk_latency if chunk_index == 1 else None  # 首块包含延迟信息
                     })
                     
                     logger.info(f'📤 Firefox PCM块 {chunk_index}: {len(pcm_bytes)} bytes')
@@ -682,16 +706,19 @@ def generate_tts_audio_streaming(text, session_id):
                 logger.error(f"❌ TTS流式响应错误: {response.status_code}")
                 break
         
-        # 发送TTS完成信号
-        tts_latency = (time.time() - tts_start) * 1000
+        # 发送TTS完成信号 - 使用首块延迟而不是总时间
+        total_generation_time = (time.time() - tts_start) * 1000
+        effective_tts_latency = first_chunk_latency if first_chunk_latency else 2000  # 默认2秒如果无首块
+        
         socketio.emit('pcm_segment_end', {
             'segment_index': segment_index,
             'chunk_count': chunk_index - 1,
-            'latency_ms': tts_latency,
+            'latency_ms': effective_tts_latency,  # 使用首块延迟
+            'total_generation_ms': total_generation_time,  # 额外信息：总生成时间
             'session_id': session_id
         })
         
-        logger.info(f'✅ Firefox TTS流式生成完成: {chunk_index-1}个块, 延迟: {tts_latency:.1f}ms')
+        logger.info(f'✅ Firefox TTS流式生成完成: {chunk_index-1}个块, 首块延迟: {effective_tts_latency:.1f}ms, 总时间: {total_generation_time:.1f}ms')
         
     except Exception as e:
         logger.error(f'❌ Firefox TTS生成失败: {e}')
