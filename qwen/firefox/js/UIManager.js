@@ -158,6 +158,98 @@ class UIManager {
         if (testBtn && eventHandlers.onTestAudio) {
             testBtn.addEventListener('click', eventHandlers.onTestAudio);
         }
+
+        // 语音控制面板
+        this.bindToneControlEvents(eventHandlers);
+    }
+
+    bindToneControlEvents(eventHandlers) {
+        // 语音控制面板切换
+        const toggleToneControls = document.getElementById('toggle-tone-controls');
+        if (toggleToneControls) {
+            toggleToneControls.addEventListener('click', () => this.toggleToneControls());
+        }
+
+        // 语速控制
+        const voiceSpeed = document.getElementById('voice-speed');
+        const speedValue = document.getElementById('speed-value');
+        if (voiceSpeed && speedValue) {
+            voiceSpeed.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                speedValue.textContent = `${value}x`;
+                if (eventHandlers.onToneControlChange) {
+                    eventHandlers.onToneControlChange('speed', value);
+                }
+            });
+        }
+
+        // 音调控制
+        const voicePitch = document.getElementById('voice-pitch');
+        const pitchValue = document.getElementById('pitch-value');
+        if (voicePitch && pitchValue) {
+            voicePitch.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                pitchValue.textContent = `${value}x`;
+                if (eventHandlers.onToneControlChange) {
+                    eventHandlers.onToneControlChange('pitch', value);
+                }
+            });
+        }
+
+        // 音量控制
+        const voiceVolume = document.getElementById('voice-volume');
+        const volumeValue = document.getElementById('volume-value');
+        if (voiceVolume && volumeValue) {
+            voiceVolume.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                volumeValue.textContent = `${Math.round(value * 100)}%`;
+                if (eventHandlers.onToneControlChange) {
+                    eventHandlers.onToneControlChange('volume', value);
+                }
+            });
+        }
+
+        // 语调选择
+        const voiceTone = document.getElementById('voice-tone');
+        if (voiceTone) {
+            voiceTone.addEventListener('change', (e) => {
+                if (eventHandlers.onToneControlChange) {
+                    eventHandlers.onToneControlChange('tone', e.target.value);
+                }
+            });
+        }
+
+        // 声音选择
+        const voiceSelection = document.getElementById('voice-selection');
+        if (voiceSelection) {
+            voiceSelection.addEventListener('change', (e) => {
+                if (eventHandlers.onToneControlChange) {
+                    eventHandlers.onToneControlChange('voice', e.target.value);
+                }
+            });
+        }
+
+        // 情感选择
+        const voiceEmotion = document.getElementById('voice-emotion');
+        if (voiceEmotion) {
+            voiceEmotion.addEventListener('change', (e) => {
+                if (eventHandlers.onToneControlChange) {
+                    eventHandlers.onToneControlChange('emotion', e.target.value);
+                }
+            });
+        }
+
+        // 测试语音
+        const testVoice = document.getElementById('test-voice');
+        if (testVoice && eventHandlers.onTestVoice) {
+            testVoice.addEventListener('click', eventHandlers.onTestVoice);
+        }
+
+        // 重置语音设置
+        const resetVoice = document.getElementById('reset-voice');
+        if (resetVoice) {
+            resetVoice.addEventListener('click', () => this.resetVoiceSettings(eventHandlers.onToneControlChange));
+        }
     }
 
     // 客户信息相关方法
@@ -320,8 +412,80 @@ class UIManager {
         } else {
             console.style.display = 'none';
             btn.textContent = '显示';
-            this.isDebugVisible = false;
         }
+    }
+
+    toggleToneControls() {
+        const content = document.getElementById('tone-content');
+        const btn = document.getElementById('toggle-tone-controls');
+        
+        if (content && btn) {
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                btn.textContent = '收起';
+            } else {
+                content.style.display = 'none';
+                btn.textContent = '展开';
+            }
+        }
+    }
+
+    resetVoiceSettings(onToneControlChange) {
+        // 重置所有语音控制到默认值
+        const defaultSettings = {
+            speed: 1.0,
+            pitch: 1.0,
+            volume: 0.8,
+            voice: 'Cherry',
+            tone: 'professional',
+            emotion: 'professional'
+        };
+
+        // 更新UI控件
+        const voiceSpeed = document.getElementById('voice-speed');
+        const speedValue = document.getElementById('speed-value');
+        if (voiceSpeed && speedValue) {
+            voiceSpeed.value = defaultSettings.speed;
+            speedValue.textContent = `${defaultSettings.speed}x`;
+        }
+
+        const voicePitch = document.getElementById('voice-pitch');
+        const pitchValue = document.getElementById('pitch-value');
+        if (voicePitch && pitchValue) {
+            voicePitch.value = defaultSettings.pitch;
+            pitchValue.textContent = `${defaultSettings.pitch}x`;
+        }
+
+        const voiceVolume = document.getElementById('voice-volume');
+        const volumeValue = document.getElementById('volume-value');
+        if (voiceVolume && volumeValue) {
+            voiceVolume.value = defaultSettings.volume;
+            volumeValue.textContent = `${Math.round(defaultSettings.volume * 100)}%`;
+        }
+
+        const voiceSelection = document.getElementById('voice-selection');
+        if (voiceSelection) {
+            voiceSelection.value = defaultSettings.voice;
+        }
+
+        const voiceTone = document.getElementById('voice-tone');
+        if (voiceTone) {
+            voiceTone.value = defaultSettings.tone;
+        }
+
+        const voiceEmotion = document.getElementById('voice-emotion');
+        if (voiceEmotion) {
+            voiceEmotion.value = defaultSettings.emotion;
+        }
+
+        // 通知主应用重置设置
+        if (onToneControlChange) {
+            Object.keys(defaultSettings).forEach(key => {
+                onToneControlChange(key, defaultSettings[key]);
+            });
+        }
+
+        this.debugLog('语音设置已重置为默认值');
     }
 
     clearDebugLog() {

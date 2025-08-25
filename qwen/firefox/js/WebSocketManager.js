@@ -171,6 +171,22 @@ class WebSocketManager {
         this.debugLog('发送聊天消息: ' + JSON.stringify(data).substring(0, 100) + '...');
     }
 
+    sendChatMessageWithVoiceSettings(data) {
+        if (!this.isConnected) {
+            throw new Error('WebSocket未连接');
+        }
+        this.socket.emit('chat_message_with_voice', data);
+        this.debugLog('发送带语音设置的消息: ' + JSON.stringify(data).substring(0, 100) + '...');
+    }
+
+    updateVoiceSettings(voiceSettings) {
+        if (!this.isConnected) {
+            return;
+        }
+        this.socket.emit('update_voice_settings', { voiceSettings });
+        this.debugLog('更新语音设置: ' + JSON.stringify(voiceSettings));
+    }
+
     startStreamingASR(sessionId) {
         if (!this.isConnected) {
             throw new Error('WebSocket未连ected');

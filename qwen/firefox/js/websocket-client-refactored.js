@@ -46,6 +46,16 @@ class AICollectionAgentWS {
         
         // 初始化应用
         this.init();
+
+        // 语音控制设置
+        this.voiceSettings = {
+            speed: 1.0,
+            pitch: 1.0, 
+            volume: 0.8,
+            voice: 'Cherry',
+            tone: 'professional',
+            emotion: 'professional'
+        };
     }
 
     createDebugLogger() {
@@ -139,6 +149,14 @@ class AICollectionAgentWS {
             
             onTestAudio: () => {
                 this.testAudio();
+            },
+
+            onToneControlChange: (param, value) => {
+                this.updateVoiceSettings(param, value);
+            },
+
+            onTestVoice: () => {
+                this.testVoiceSettings();
             }
         };
         
@@ -704,6 +722,37 @@ class AICollectionAgentWS {
         } catch (error) {
             console.error('音频测试失败:', error);
             this.debugLog('音频测试失败: ' + error.message);
+        }
+    }
+
+    // 语音控制相关方法
+    updateVoiceSettings(param, value) {
+        this.voiceSettings[param] = value;
+        this.debugLog(`语音设置更新: ${param} = ${value}`);
+        
+        // 立即应用设置到正在进行的语音生成
+        this.webSocketManager.updateVoiceSettings(this.voiceSettings);
+    }
+
+    testVoiceSettings() {
+        try {
+            const testMessage = '您好，这是语音控制测试。请听一下当前的语音设置效果如何。';
+            
+            // 保存测试消息用于准确性评估
+            this.lastAgentMessage = testMessage;
+            
+            // 发送带有当前语音设置的测试消息
+            this.webSocketManager.sendChatMessageWithVoiceSettings({
+                message: testMessage,
+                messageType: 'voice_test',
+                voiceSettings: this.voiceSettings
+            });
+            
+            this.debugLog(`测试语音设置: ${JSON.stringify(this.voiceSettings)}`);
+            
+        } catch (error) {
+            console.error('语音设置测试失败:', error);
+            this.debugLog('语音设置测试失败: ' + error.message);
         }
     }
 

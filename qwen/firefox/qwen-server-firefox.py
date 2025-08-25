@@ -53,6 +53,16 @@ logger.info("✅ DashScope API配置完成 (Firefox OGG/Opus优化版)")
 conversation_history = []
 active_asr_sessions = {}  # 存储活跃的流式ASR会话
 
+# 全局语音设置
+current_voice_settings = {
+    'speed': 1.0,
+    'pitch': 1.0, 
+    'volume': 0.8,
+    'voice': 'Cherry',
+    'tone': 'professional',
+    'emotion': 'professional'
+}
+
 # Dead code removed - HTTP transcribe route and recognize_firefox_ogg_opus function
 # All transcription now uses streaming ASR via WebSocket
 
@@ -594,10 +604,14 @@ def build_collection_prompt(customer_context, conversation_history):
 
     return system_prompt
 
-def process_firefox_llm_and_tts(user_text, session_id):
+def process_firefox_llm_and_tts(user_text, session_id, voice_settings=None):
     """处理Firefox LLM响应和TTS生成"""
     try:
-        logger.info(f'💬 Firefox LLM处理开始: "{user_text}" (session: {session_id})')
+        # 使用传入的语音设置或全局设置
+        if voice_settings is None:
+            voice_settings = current_voice_settings
+            
+        logger.info(f'💬 Firefox LLM处理开始: "{user_text}" (session: {session_id}) 语音设置: {voice_settings}')
         llm_start = time.time()
         
         # 构建专业催收对话提示 - 与Chrome版本保持一致
@@ -641,7 +655,7 @@ def process_firefox_llm_and_tts(user_text, session_id):
             
             # 生成TTS音频（复用现有TTS逻辑）
             logger.info(f'🎵 启动Firefox TTS生成...')
-            generate_tts_audio_streaming(ai_response, session_id)
+            generate_tts_audio_streaming(ai_response, session_id, voice_settings)
         else:
             logger.error(f"❌ LLM调用失败: status={response.status_code}")
             
@@ -650,22 +664,45 @@ def process_firefox_llm_and_tts(user_text, session_id):
         import traceback
         traceback.print_exc()
 
-def generate_tts_audio_streaming(text, session_id):
-    """生成流式TTS音频 - Firefox版本"""
+def generate_tts_audio_streaming(text, session_id, voice_settings=None):
+    """生成流式TTS音频 - Firefox版本，支持语音控制参数"""
     try:
         import dashscope.audio.qwen_tts
         import base64  # 添加base64导入
         
+        # 使用传入的语音设置或全局设置
+        if voice_settings is None:
+            voice_settings = current_voice_settings
+        
         tts_start = time.time()
-        logger.info(f'🎵 Firefox TTS开始生成: "{text}"')
+        logger.info(f'🎵 Firefox TTS开始生成: "{text}" 语音设置: {voice_settings}')
+        
+        # 构建TTS API参数 - 使用最新的qwen-tts-latest模型
+        tts_params = {
+            "model": "qwen-tts-latest",  # 🚀 使用latest版本获得更多语音控制
+            "text": text,
+            "voice": voice_settings.get('voice', 'Cherry'),  # 🎯 支持多种声音选择
+            "stream": True,  # 流式处理
+            "format": "pcm",  # PCM格式用于流式传输
+            "sample_rate": 24000  # 24kHz采样率
+        }
+        
+        # 🎯 应用语音控制参数（基于阿里云SDK文档）
+        if 'speed' in voice_settings:
+            tts_params['speed'] = voice_settings['speed']  # 语速控制
+        if 'pitch' in voice_settings:
+            tts_params['pitch'] = voice_settings['pitch']  # 音调控制  
+        if 'volume' in voice_settings:
+            tts_params['volume'] = voice_settings['volume']  # 音量控制
+        if 'tone' in voice_settings and voice_settings['tone'] != 'neutral':
+            tts_params['tone'] = voice_settings['tone']  # 语调控制
+        if 'emotion' in voice_settings and voice_settings['emotion'] != 'neutral':
+            tts_params['emotion'] = voice_settings['emotion']  # 情感控制
+        
+        logger.info(f'🎵 TTS参数: {tts_params}')
         
         # 使用Chrome相同的TTS API - 修复SpeechSynthesizer问题
-        responses = dashscope.audio.qwen_tts.SpeechSynthesizer.call(
-            model="qwen-tts",
-            text=text,
-            voice="Cherry",  # 中文女声
-            stream=True  # 流式处理
-        )
+        responses = dashscope.audio.qwen_tts.SpeechSynthesizer.call(**tts_params)
         
         # 检查responses是否为None
         if responses is None:
@@ -697,7 +734,8 @@ def generate_tts_audio_streaming(text, session_id):
                         'sample_rate': 24000,  # DashScope TTS默认24kHz
                         'format': 'pcm',
                         'session_id': session_id,
-                        'first_chunk_latency': first_chunk_latency if chunk_index == 1 else None  # 首块包含延迟信息
+                        'first_chunk_latency': first_chunk_latency if chunk_index == 1 else None,  # 首块包含延迟信息
+                        'voice_settings': voice_settings  # 包含语音设置信息
                     })
                     
                     logger.info(f'📤 Firefox PCM块 {chunk_index}: {len(pcm_bytes)} bytes')
@@ -715,10 +753,11 @@ def generate_tts_audio_streaming(text, session_id):
             'chunk_count': chunk_index - 1,
             'latency_ms': effective_tts_latency,  # 使用首块延迟
             'total_generation_ms': total_generation_time,  # 额外信息：总生成时间
-            'session_id': session_id
+            'session_id': session_id,
+            'voice_settings': voice_settings  # 包含使用的语音设置
         })
         
-        logger.info(f'✅ Firefox TTS流式生成完成: {chunk_index-1}个块, 首块延迟: {effective_tts_latency:.1f}ms, 总时间: {total_generation_time:.1f}ms')
+        logger.info(f'✅ Firefox TTS流式生成完成: {chunk_index-1}个块, 首块延迟: {effective_tts_latency:.1f}ms, 总时间: {total_generation_time:.1f}ms, 语音设置: {voice_settings}')
         
     except Exception as e:
         logger.error(f'❌ Firefox TTS生成失败: {e}')
@@ -917,6 +956,60 @@ def handle_chat_message(data):
         logger.error(f'❌ Firefox聊天消息处理失败: {e}')
         emit('error', {
             'message': f'消息处理失败: {str(e)}'
+        })
+
+@socketio.on('chat_message_with_voice')
+def handle_chat_message_with_voice(data):
+    """处理带有语音设置的聊天消息"""
+    try:
+        message = data.get('message', '')
+        message_type = data.get('messageType', 'chat')
+        voice_settings = data.get('voiceSettings', current_voice_settings)
+        session_id = request.sid
+        
+        logger.info(f'💬 Firefox带语音设置的消息: "{message[:50]}..." 设置: {voice_settings}')
+        
+        if message_type == 'voice_test':
+            # 语音测试 - 直接生成TTS
+            logger.info(f'🎯 Firefox语音测试: {message}')
+            generate_tts_audio_streaming(message, session_id, voice_settings)
+            
+        elif message_type == 'customer_with_context':
+            # 用户消息 - 处理LLM和TTS，使用特定语音设置
+            process_firefox_llm_and_tts(message, session_id, voice_settings)
+            
+        else:
+            # 其他消息类型 - 使用特定语音设置
+            generate_tts_audio_streaming(message, session_id, voice_settings)
+            
+    except Exception as e:
+        logger.error(f'❌ Firefox带语音设置消息处理失败: {e}')
+        emit('error', {
+            'message': f'消息处理失败: {str(e)}'
+        })
+
+@socketio.on('update_voice_settings')
+def handle_update_voice_settings(data):
+    """更新全局语音设置"""
+    try:
+        global current_voice_settings
+        voice_settings = data.get('voiceSettings', {})
+        
+        # 更新全局设置
+        current_voice_settings.update(voice_settings)
+        
+        logger.info(f'✅ Firefox语音设置已更新: {current_voice_settings}')
+        
+        # 确认更新
+        emit('voice_settings_updated', {
+            'success': True,
+            'settings': current_voice_settings
+        })
+        
+    except Exception as e:
+        logger.error(f'❌ Firefox语音设置更新失败: {e}')
+        emit('error', {
+            'message': f'语音设置更新失败: {str(e)}'
         })
 
 # Dead code removed - WebSocket transcribe_audio handler
