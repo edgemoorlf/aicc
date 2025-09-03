@@ -681,7 +681,7 @@ def generate_tts_audio_streaming(text, session_id, voice_settings=None):
         tts_params = {
             "model": "qwen-tts-latest",  # 🚀 使用latest版本获得更多语音控制
             "text": text,
-            "voice": voice_settings.get('voice', 'Cherry'),  # 🎯 支持多种声音选择
+            "voice": voice_settings.get('voice', 'Dylan'),  # 🎯 支持多种声音选择
             "stream": True,  # 流式处理
             "format": "pcm",  # PCM格式用于流式传输
             "sample_rate": 24000  # 24kHz采样率
