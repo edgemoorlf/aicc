@@ -214,3 +214,6 @@ tests/
 *.backup
 data/
 .vscode/
+test*
+.DS_Store
+*.log

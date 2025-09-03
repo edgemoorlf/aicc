@@ -1,5 +1,6 @@
-# AI催收助手 - Qwen实现服务器
-# 基于Python Flask + Alibaba Cloud APIs
+# AI催收助手 - Chrome WebM/Opus实现服务器  
+# 支持WebM格式，通过WebM→WAV转换后发送到DashScope
+# 针对Chrome、Edge、Opera浏览器优化
 
 import os
 import re
@@ -34,6 +35,7 @@ dashscope.api_key = DASHSCOPE_API_KEY
 
 # 全局变量
 conversation_history = []
+active_asr_sessions = {}  # 存储活跃的流式ASR会话
 
 # 静态文件服务
 @app.route('/')
@@ -145,7 +147,7 @@ def chat():
         system_prompt = build_collection_prompt(customer_context, conversation_history, message)
         
         # 调用通义千问生成回复
-        ai_response = generate_ai_response(system_prompt)
+        ai_response = generate_ai_response(system_prompt, message)
         
         if not ai_response:
             return jsonify({'error': '生成AI回复失败'}), 500
@@ -248,7 +250,7 @@ def evaluate_accuracy():
             'details': str(e)
         }), 500
 
-def build_collection_prompt(customer_context, conversation_history, user_message):
+def build_collection_prompt(customer_context, conversation_history):
     """构建催收专员的系统提示"""
     
     # 格式化金额
@@ -262,16 +264,15 @@ def build_collection_prompt(customer_context, conversation_history, user_message
                 return f"{wan}万{remainder}元"
         return f"{amount}元"
     
-    # 构建对话历史
+    # 构建对话历史（不包含当前用户消息）
     conversation_text = ""
     if conversation_history:
         conversation_text = "\n本次通话记录:\n"
         for i, entry in enumerate(conversation_history):
             role = "客户" if entry.get('sender') == 'user' else "催收员"
             conversation_text += f"{i+1}. {role}: {entry.get('text', '')}\n"
-        conversation_text += f"{len(conversation_history)+1}. 客户: {user_message}\n"
     else:
-        conversation_text = f"\n本次通话记录:\n1. 客户: {user_message}\n"
+        conversation_text = "\n本次通话记录:\n[对话刚开始]"
     
     system_prompt = f"""你是平安银行信用卡中心的专业催收专员，正在进行电话催收工作。
 
@@ -328,7 +329,7 @@ def build_collection_prompt(customer_context, conversation_history, user_message
 
     return system_prompt
 
-def generate_ai_response(system_prompt):
+def generate_ai_response(system_prompt, user_message):
     """使用通义千问生成AI回复"""
     try:
         llm_start_time = time.time()
@@ -336,8 +337,8 @@ def generate_ai_response(system_prompt):
         response = Generation.call(
             model='qwen-plus',
             messages=[
-                {'role': 'system', 'content': '你是专业的银行催收专员，必须使用中文回复。'},
-                {'role': 'user', 'content': system_prompt}
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_message}
             ],
             temperature=0.7,
             max_tokens=500,
@@ -433,7 +434,6 @@ def generate_tts_audio_streaming(text, segment_index=0, total_segments=1):
                 return False
             else:
                 logger.info(f'等待1秒后重试...')
-                import time
                 time.sleep(1)
 
 def generate_tts_audio(text):
@@ -479,11 +479,10 @@ def generate_tts_audio(text):
                 return []
             else:
                 logger.info(f'等待1秒后重试...')
-                import time
                 time.sleep(1)
 
 def recognize_speech_dashscope(audio_file):
-    """使用DashScope进行语音识别"""
+    """使用DashScope进行语音识别 - 支持WebM/Opus格式"""
     try:
         logger.info('开始DashScope语音识别...')
         
@@ -491,34 +490,38 @@ def recognize_speech_dashscope(audio_file):
         audio_content = audio_file.read()
         logger.info(f'音频文件大小: {len(audio_content)} bytes')
         
-        # 直接使用WebM格式进行ASR
+        # 🎯 直接使用WebM/Opus格式进行ASR
         import tempfile
         
-        # 保存原始WebM文件
+        # 保存原始WebM/Opus文件
         with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as webm_file:
             webm_file.write(audio_content)
             webm_file_path = webm_file.name
         
-        logger.info(f'WebM文件大小: {len(audio_content)} bytes location: {webm_file_path}')
+        logger.info(f'WebM/Opus文件大小: {len(audio_content)} bytes location: {webm_file_path}')
         
         try:
-            logger.info('使用8kHz WebM直接识别...')
+            logger.info('尝试WebM格式直接识别...')
             
-            # 直接使用8k模型处理8kHz WebM
+            # 🎯 尝试直接使用WebM格式处理
             recognition = Recognition(
                 model='paraformer-realtime-8k-v2',
-                format='webm',
-                sample_rate=8000,  # 客户端现在生成8kHz WebM
-                callback=None
+                format='webm',  # 尝试WebM格式
+                sample_rate=8000,
+                callback=None,
+                # 🎯 高级参数优化
+                semantic_punctuation_enabled=True,  # 智能标点符号
+                max_sentence_silence=2000,          # 2秒静音检测，适应自然对话
+                heartbeat=True                      # 心跳保持长连接稳定
             )
             
             result = recognition.call(webm_file_path)
-            logger.info(f'8kHz WebM识别完成，状态: {getattr(result, "status_code", "未知")}')
+            logger.info(f'WebM识别完成，状态: {getattr(result, "status_code", "未知")}')
             
-            # 检查8kHz WebM识别是否成功
+            # 检查WebM识别是否成功
             if hasattr(result, 'get_sentence') and result.get_sentence():
                 sentences = result.get_sentence()
-                logger.info(f'8kHz WebM识别成功，识别到 {len(sentences)} 个句子')
+                logger.info(f'WebM识别成功，识别到 {len(sentences)} 个句子')
                 
                 transcript_parts = []
                 for sentence_obj in sentences:
@@ -527,7 +530,7 @@ def recognize_speech_dashscope(audio_file):
                 
                 transcript = ''.join(transcript_parts)
                 if transcript.strip():
-                    logger.info(f'8kHz WebM识别结果: {transcript}')
+                    logger.info(f'WebM识别结果: {transcript}')
                     return transcript.strip()
             
             elif hasattr(result, 'output') and result.output and hasattr(result.output, 'sentence') and result.output.sentence:
@@ -539,17 +542,17 @@ def recognize_speech_dashscope(audio_file):
                 
                 transcript = ''.join(transcript_parts)
                 if transcript.strip():
-                    logger.info(f'8kHz WebM识别结果: {transcript}')
+                    logger.info(f'WebM识别结果: {transcript}')
                     return transcript.strip()
             
-            logger.warning('8kHz WebM识别失败，回退到WAV转换')
+            logger.warning('WebM识别失败，回退到WAV转换')
             
         except Exception as webm_error:
-            logger.warning(f'8kHz WebM识别异常，回退到WAV转换: {str(webm_error)}')
+            logger.warning(f'WebM识别异常，回退到WAV转换: {str(webm_error)}')
         
-        # 回退方案：转换为WAV
+        # 回退方案：转换为WAV（如果需要）
         try:
-            logger.info('使用WebM转WAV + 8kHz模型进行ASR...')
+            logger.info('使用WebM转WAV + ASR进行识别...')
             
             # 转换WebM到8kHz WAV
             from pydub import AudioSegment
@@ -566,7 +569,11 @@ def recognize_speech_dashscope(audio_file):
                 model='paraformer-realtime-8k-v2',
                 format='wav',
                 sample_rate=8000,
-                callback=None
+                callback=None,
+                # 🎯 高级参数优化
+                semantic_punctuation_enabled=True,  # 智能标点符号
+                max_sentence_silence=2000,          # 2秒静音检测，适应自然对话
+                heartbeat=True                      # 心跳保持长连接稳定
             )
             
             # 进行语音识别
@@ -622,7 +629,6 @@ def recognize_speech_dashscope(audio_file):
             
         finally:
             # 清理临时WebM文件
-            import time
             time.sleep(1)  # 给文件系统一点时间
             # try:
             #     if os.path.exists(webm_file_path):
@@ -746,6 +752,292 @@ def handle_connect():
 def handle_disconnect():
     logger.info('客户端断开WebSocket连接')
 
+# ====== 流式ASR实现 ======
+class StreamingASRSession:
+    """流式ASR会话管理"""
+    def __init__(self, session_id, client_sid):
+        self.session_id = session_id
+        self.client_sid = client_sid
+        self.recognition = None
+        self.start_time = time.time()
+        self.is_active = False
+        self.results = []
+        
+    def start_recognition(self):
+        """启动流式ASR识别"""
+        try:
+            logger.info(f'启动流式ASR会话: {self.session_id}')
+            
+            # 创建回调实例
+            callback = StreamingASRCallback(self)
+            
+            # 创建Recognition实例 - 使用Opus格式
+            self.recognition = Recognition(
+                model="paraformer-realtime-8k-v2",
+                format="wav",  # Chrome实现：WebM→WAV转换后使用WAV格式
+                sample_rate=8000,  # 8kHz采样率
+                callback=callback,
+                # 🎯 高级参数优化
+                semantic_punctuation_enabled=True,  # 智能标点符号
+                max_sentence_silence=2000,          # 2秒静音检测，适应自然对话
+                heartbeat=True                      # 心跳保持长连接稳定
+            )
+            
+            # 启动识别
+            self.recognition.start()
+            self.is_active = True
+            
+            logger.info(f'流式ASR会话启动成功: {self.session_id}')
+            return True
+            
+        except Exception as e:
+            logger.error(f'启动流式ASR失败: {e}')
+            return False
+    
+    def send_opus_chunk(self, opus_data):
+        """发送Opus音频块"""
+        if self.recognition and self.is_active:
+            try:
+                self.recognition.send_audio_frame(opus_data)
+                logger.debug(f'发送Opus块: {len(opus_data)} bytes')
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f'发送Opus数据失败: {error_msg}')
+                
+                # 🔄 如果ASR会话已停止，自动重启以保持电话连接
+                if "Speech recognition has stopped" in error_msg or "stopped" in error_msg.lower():
+                    logger.info(f'🔄 检测到ASR会话停止，自动重启: {self.session_id}')
+                    if self.restart_recognition():
+                        # 重启成功，重新发送这个Opus块
+                        try:
+                            self.recognition.send_audio_frame(opus_data)
+                            logger.info(f'✅ ASR重启后成功发送Opus块: {len(opus_data)} bytes')
+                        except Exception as retry_error:
+                            logger.error(f'ASR重启后仍然发送失败: {retry_error}')
+    
+    def restart_recognition(self):
+        """重启流式ASR识别（保持电话通话连接）"""
+        try:
+            logger.info(f'重启流式ASR会话: {self.session_id}')
+            
+            # 停止当前识别
+            if self.recognition and self.is_active:
+                try:
+                    self.recognition.stop()
+                except:
+                    pass  # 忽略停止错误
+                    
+            # 重新创建回调和识别实例
+            callback = StreamingASRCallback(self)
+            
+            self.recognition = Recognition(
+                model="paraformer-realtime-8k-v2",
+                format="wav",  # Chrome实现：WebM→WAV转换后使用WAV格式
+                sample_rate=8000,
+                callback=callback,
+                # 🎯 高级参数优化
+                semantic_punctuation_enabled=True,  # 智能标点符号
+                max_sentence_silence=2000,          # 2秒静音检测，适应自然对话
+                heartbeat=True                      # 心跳保持长连接稳定
+            )
+            
+            # 启动新的识别会话
+            self.recognition.start()
+            self.is_active = True
+            
+            logger.info(f'流式ASR会话重启成功: {self.session_id}')
+            return True
+            
+        except Exception as e:
+            logger.error(f'重启流式ASR失败: {e}')
+            self.is_active = False
+            return False
+    
+    def stop_recognition(self):
+        """停止流式ASR识别"""
+        if self.recognition and self.is_active:
+            try:
+                self.recognition.stop()
+                self.is_active = False
+                logger.info(f'流式ASR会话已停止: {self.session_id}')
+            except Exception as e:
+                logger.error(f'停止流式ASR失败: {e}')
+
+class StreamingASRCallback:
+    """流式ASR回调处理器"""
+    def __init__(self, session):
+        self.session = session
+        
+    def on_open(self):
+        logger.info(f'流式ASR连接建立: {self.session.session_id}')
+        socketio.emit('asr_connected', {
+            'session_id': self.session.session_id,
+            'status': 'connected'
+        }, room=self.session.client_sid)
+        
+    def on_event(self, result):
+        """接收ASR识别结果"""
+        elapsed = int((time.time() - self.session.start_time) * 1000)
+        logger.info(f'流式ASR结果 ({elapsed}ms): {result}')
+        
+        # 保存结果
+        self.session.results.append(result)
+        
+        # 立即发送到客户端
+        socketio.emit('asr_result', {
+            'session_id': self.session.session_id,
+            'result': result,
+            'elapsed_ms': elapsed
+        }, room=self.session.client_sid)
+        
+        # 如果是完整句子，提取文本进行AI处理
+        if (result.get('output') and 
+            result['output'].get('sentence') and 
+            result['output']['sentence'].get('sentence_end', False)):
+            
+            text = result['output']['sentence'].get('text', '')
+            if text.strip():
+                logger.info(f'流式ASR完整句子: {text}')
+                # 异步处理AI回复
+                socketio.start_background_task(self.process_asr_text, text)
+    
+    def process_asr_text(self, text):
+        """处理ASR识别的完整文本"""
+        try:
+            # 发送用户消息事件
+            socketio.emit('user_speech_recognized', {
+                'text': text,
+                'timestamp': time.time()
+            }, room=self.session.client_sid)
+            
+            logger.info(f'用户语音识别完成: {text}')
+            
+        except Exception as e:
+            logger.error(f'处理ASR文本失败: {e}')
+        
+    def on_complete(self):
+        logger.info(f'流式ASR识别完成: {self.session.session_id}')
+        
+        # 🔄 自动重启ASR会话以保持持续监听（模拟电话通话）
+        logger.info(f'🔄 自动重启ASR会话以保持电话通话连接: {self.session.session_id}')
+        try:
+            # 重新启动识别
+            self.session.restart_recognition()
+        except Exception as e:
+            logger.error(f'自动重启ASR会话失败: {e}')
+            
+        socketio.emit('asr_completed', {
+            'session_id': self.session.session_id
+        }, room=self.session.client_sid)
+        
+    def on_error(self, error):
+        logger.error(f'流式ASR错误: {error}')
+        socketio.emit('asr_error', {
+            'session_id': self.session.session_id,
+            'error': str(error)
+        }, room=self.session.client_sid)
+        
+    def on_close(self):
+        logger.info(f'流式ASR连接关闭: {self.session.session_id}')
+        socketio.emit('asr_disconnected', {
+            'session_id': self.session.session_id
+        }, room=self.session.client_sid)
+
+# ====== 流式ASR WebSocket事件处理 ======
+
+@socketio.on('start_streaming_asr')
+def handle_start_streaming_asr(data):
+    """启动流式ASR会话"""
+    try:
+        session_id = data.get('session_id', f'asr_{int(time.time())}')
+        client_sid = request.sid
+        
+        logger.info(f'客户端请求启动流式ASR: {session_id}')
+        
+        # 创建ASR会话
+        asr_session = StreamingASRSession(session_id, client_sid)
+        
+        # 启动识别
+        if asr_session.start_recognition():
+            # 保存会话
+            active_asr_sessions[session_id] = asr_session
+            
+            emit('asr_session_started', {
+                'session_id': session_id,
+                'status': 'success'
+            })
+        else:
+            emit('asr_session_failed', {
+                'session_id': session_id,
+                'error': '启动流式ASR失败'
+            })
+            
+    except Exception as e:
+        logger.error(f'启动流式ASR会话失败: {e}')
+        emit('asr_session_failed', {
+            'error': str(e)
+        })
+
+@socketio.on('send_opus_chunk')
+def handle_send_opus_chunk(data):
+    """接收并处理OGG/Opus音频块"""
+    try:
+        session_id = data.get('session_id')
+        opus_data = data.get('opus_data')  # 应该是字节数组或二进制数据
+        
+        if not session_id or not opus_data:
+            logger.warning('缺少session_id或opus_data')
+            return
+            
+        # 查找会话
+        asr_session = active_asr_sessions.get(session_id)
+        if not asr_session:
+            logger.warning(f'未找到ASR会话: {session_id}')
+            return
+            
+        # 转换Opus数据格式
+        if isinstance(opus_data, list):
+            opus_bytes = bytes(opus_data)
+        else:
+            opus_bytes = opus_data
+            
+        # 🎯 发送到ASR - 直接使用OGG/Opus格式
+        asr_session.send_opus_chunk(opus_bytes)
+        
+        logger.debug(f'处理Opus块: 会话{session_id}, 大小{len(opus_bytes)} bytes')
+        
+    except Exception as e:
+        logger.error(f'处理Opus音频块失败: {e}')
+
+@socketio.on('stop_streaming_asr')
+def handle_stop_streaming_asr(data):
+    """停止流式ASR会话"""
+    try:
+        session_id = data.get('session_id')
+        
+        if not session_id:
+            logger.warning('停止ASR请求缺少session_id')
+            return
+            
+        # 查找并停止会话
+        asr_session = active_asr_sessions.get(session_id)
+        if asr_session:
+            asr_session.stop_recognition()
+            del active_asr_sessions[session_id]
+            
+            emit('asr_session_stopped', {
+                'session_id': session_id
+            })
+            
+            logger.info(f'流式ASR会话已停止: {session_id}')
+        else:
+            logger.warning(f'未找到要停止的ASR会话: {session_id}')
+            
+    except Exception as e:
+        logger.error(f'停止流式ASR会话失败: {e}')
+
+# ====== 现有聊天处理 ======
+
 def clean_ai_response_for_tts(ai_text):
     """清理AI回复文本，移除催收员前缀但保留所有内容"""
     # 移除"催收员："前缀和编号，但保留所有内容作为连续文本
@@ -780,7 +1072,7 @@ def handle_chat_message(data):
         system_prompt = build_collection_prompt(customer_context, conversation_history, message)
         
         # 调用通义千问生成回复
-        ai_response, llm_latency = generate_ai_response(system_prompt)
+        ai_response, llm_latency = generate_ai_response(system_prompt, message)
         
         if not ai_response:
             emit('error', {'error': '生成AI回复失败'})
