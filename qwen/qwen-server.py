@@ -7,6 +7,7 @@ import json
 import base64
 import time
 import requests
+import requests
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -347,9 +348,7 @@ def generate_ai_response(system_prompt):
         
         if response.status_code == 200:
             ai_text = response.output.choices[0].message.content
-            ai_text = ai_text.strip()
-            logger.info(f'通义千问LLM处理完成: {llm_latency}ms')
-            return ai_text, llm_latency
+            return ai_text.strip()
         else:
             logger.error(f'通义千问API调用失败: {response.status_code}')
             return None, 0

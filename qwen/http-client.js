@@ -13,6 +13,7 @@ class AICollectionAgent {
         this.currentScenario = 'overdue_payment';
         this.conversationHistory = [];
         this.customerHasResponded = false; // 新增：标记客户是否已回应
+        this.customerHasResponded = false; // 新增：标记客户是否已回应
         this.metrics = {
             latency: [],
             accuracy: [],
