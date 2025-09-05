@@ -47,16 +47,37 @@ public class ChatbotServiceImpl implements ChatbotService {
             GenericResponse<AnswerDto> answer = new GenericResponse<>();
             answer.setRequestId(beginSessionRequest.getRequestId());
 
+            // Extract customer info from vendorParams for collection context
+            String customerName = "客户";
+            String overdueAmount = "一万五千元"; 
+            String overdueDays = "30天";
+            
+            if (beginSessionRequest.getVendorParams() != null) {
+                Map<String, String> vendorParams = beginSessionRequest.getVendorParams();
+                if (vendorParams.containsKey("customerName")) {
+                    customerName = vendorParams.get("customerName");
+                }
+                if (vendorParams.containsKey("overdueAmount")) {
+                    overdueAmount = formatChineseAmount(vendorParams.get("overdueAmount"));
+                }
+                if (vendorParams.containsKey("overdueDays")) {
+                    overdueDays = vendorParams.get("overdueDays") + "天";
+                }
+            }
+            
+            // Generate professional collection greeting
+            String collectionGreeting = String.format("您好%s，我是银行催收专员。关于您%s逾期%s的款项，需要和您协商还款事宜。", 
+                    customerName, overdueAmount, overdueDays);
+
             answer.setData(
                     AnswerDto.builder().sessionId(beginSessionRequest.getSessionId())
                             .streamId(beginSessionRequest.getStreamId())
-                            .answer("欢迎来到三方大模型机器人。")
+                            .answer(collectionGreeting)
                             .streamEnd(true)
                             .updatedTime(System.currentTimeMillis())
                             .controlParamsList(new ArrayList<>())
                             .build()
             );
-
 
             sseCallback.onResponse(answer);
         }, 5, TimeUnit.MILLISECONDS);
@@ -74,18 +95,20 @@ public class ChatbotServiceImpl implements ChatbotService {
             } else {
                 this.buildDefaultAnswer(dialogueRequest, sseCallback);
             }
-        } else if (dialogueRequest.getUtterance().contains("新闻")) {
-            this.buildAnswerOnTurn2(dialogueRequest, sseCallback);
-        } else if (dialogueRequest.getUtterance().contains("收号")) {
-            this.buildDtmfAnswer(dialogueRequest, sseCallback);
+        } else if (dialogueRequest.getUtterance().contains("分期") || dialogueRequest.getUtterance().contains("还款计划")) {
+            this.buildCollectionPaymentPlanAnswer(dialogueRequest, sseCallback);
+        } else if (dialogueRequest.getUtterance().contains("没钱") || dialogueRequest.getUtterance().contains("没有钱")) {
+            this.buildCollectionNoMoneyAnswer(dialogueRequest, sseCallback);
         } else if (dialogueRequest.getUtterance().contains("转人工")) {
             this.buildTransferAnswer(dialogueRequest, sseCallback);
         } else if (dialogueRequest.getUtterance().contains("挂机")) {
             this.buildHangupAnswer(dialogueRequest, sseCallback);
+        } else if (dialogueRequest.getUtterance().contains("收号")) {
+            this.buildDtmfAnswer(dialogueRequest, sseCallback);
         } else if (dialogueRequest.getUtterance().contains("错误")) {
             this.buildErrorAnswer(dialogueRequest, sseCallback);
         } else {
-            this.buildDefaultAnswer(dialogueRequest, sseCallback);
+            this.buildCollectionDefaultAnswer(dialogueRequest, sseCallback);
         }
 
     }
@@ -100,6 +123,154 @@ public class ChatbotServiceImpl implements ChatbotService {
     public BaseResponse endSession(EndSessionRequest endSessionRequest) {
         log.info("End session request is {}.", JSON.toJSONString(endSessionRequest));
         return new BaseResponse();
+    }
+
+    private String formatChineseAmount(String amount) {
+        if (amount == null || amount.trim().isEmpty()) {
+            return "一万五千元";
+        }
+        
+        // Remove any existing currency symbols and whitespace
+        String cleanAmount = amount.replaceAll("[元,，\\s]", "");
+        
+        try {
+            // Try to parse as number
+            double value = Double.parseDouble(cleanAmount);
+            
+            // Convert to Chinese format for TTS readability
+            if (value >= 10000) {
+                double wan = value / 10000;
+                if (wan == (int)wan) {
+                    return String.format("%.0f万元", wan);
+                } else {
+                    return String.format("%.1f万元", wan);
+                }
+            } else if (value >= 1000) {
+                double qian = value / 1000;
+                if (qian == (int)qian) {
+                    return String.format("%.0f千元", qian);
+                } else {
+                    return String.format("%.1f千元", qian);
+                }
+            } else {
+                return String.format("%.0f元", value);
+            }
+        } catch (NumberFormatException e) {
+            // If parsing fails, return the original or default
+            return amount.contains("元") ? amount : amount + "元";
+        }
+    }
+
+    private void buildCollectionPaymentPlanAnswer(DialogueRequest dialogueRequest, SseCallback<GenericResponse<AnswerDto>> sseCallback) {
+        scheduledExecutorService.schedule(() -> {
+            GenericResponse<AnswerDto> answer = new GenericResponse<>();
+            answer.setRequestId(dialogueRequest.getRequestId());
+
+            answer.setData(
+                    AnswerDto.builder().sessionId(dialogueRequest.getSessionId())
+                            .streamId(dialogueRequest.getStreamId())
+                            .answer("理解您的情况。我们可以为您提供分期还款方案，比如分3期、6期或12期。请问您希望分几期还款？我们会根据您的实际情况制定合适的还款计划。")
+                            .streamEnd(true)
+                            .updatedTime(System.currentTimeMillis())
+                            .controlParamsList(new ArrayList<>())
+                            .build()
+            );
+
+            sseCallback.onResponse(answer);
+        }, 10, TimeUnit.MILLISECONDS);
+    }
+
+    private void buildCollectionNoMoneyAnswer(DialogueRequest dialogueRequest, SseCallback<GenericResponse<AnswerDto>> sseCallback) {
+        scheduledExecutorService.schedule(() -> {
+            GenericResponse<AnswerDto> answer = new GenericResponse<>();
+            answer.setRequestId(dialogueRequest.getRequestId());
+
+            answer.setData(
+                    AnswerDto.builder().sessionId(dialogueRequest.getSessionId())
+                            .streamId(dialogueRequest.getStreamId())
+                            .answer("我理解您目前的经济困难。我们银行也希望能帮助您解决问题。可以考虑先还一部分，哪怕是最低还款额，这样可以避免影响您的征信记录。您看这样行吗？")
+                            .streamEnd(true)
+                            .updatedTime(System.currentTimeMillis())
+                            .controlParamsList(new ArrayList<>())
+                            .build()
+            );
+
+            sseCallback.onResponse(answer);
+        }, 10, TimeUnit.MILLISECONDS);
+    }
+
+    private void buildCollectionDefaultAnswer(DialogueRequest dialogueRequest, SseCallback<GenericResponse<AnswerDto>> sseCallback) {
+        List<Message> messages = new ArrayList<>();
+        
+        // Build collection-specific prompt
+        String collectionPrompt = String.format(
+            "你是一名专业的银行催收专员，正在与客户进行债务协商对话。请用专业、礼貌但坚定的语气回应客户。" +
+            "要求：1）使用专业的金融术语 2）保持礼貌和尊重 3）提供解决方案 4）回复要简洁，适合语音对话 5）不超过50字\n\n" +
+            "客户说：%s\n\n" +
+            "请回复：", 
+            dialogueRequest.getUtterance()
+        );
+        
+        messages.add(Message.builder()
+                .content(collectionPrompt)
+                .role(Role.USER.getValue())
+                .build()
+        );
+
+        GenerationParam param = GenerationParam.builder()
+                .model("qwen-plus")
+                .apiKey("sk-89daa2f5ce954abba7770a87fa342db5")
+                .resultFormat(GenerationParam.ResultFormat.TEXT)
+                .messages(messages)
+                .incrementalOutput(false)
+                .build();
+
+        try {
+            log.info("Collection prompt sent to LLM: {}", collectionPrompt);
+            generation.streamCall(param, new ResultCallback<GenerationResult>() {
+                @Override
+                public void onEvent(GenerationResult generationResult) {
+                    log.info("Receive collection response: {}", JSON.toJSONString(generationResult));
+                    GenericResponse<AnswerDto> answer = new GenericResponse<>();
+                    answer.setRequestId(dialogueRequest.getRequestId());
+                    List<String> controlParams = new ArrayList<>();
+                    VoiceControlParams params = VoiceControlParams.builder()
+                            .interruptible(true)
+                            .build();
+                    controlParams.add(JSON.toJSONString(params));
+                    AnswerDto answerDto = AnswerDto.builder()
+                            .streamId(dialogueRequest.getStreamId())
+                            .sessionId(dialogueRequest.getSessionId())
+                            .updatedTime(System.currentTimeMillis())
+                            .answer(generationResult.getOutput().getText())
+                            .streamEnd("stop".equals(generationResult.getOutput().getFinishReason()))
+                            .controlParamsList(controlParams)
+                            .build();
+                    answer.setData(answerDto);
+                    sseCallback.onResponse(answer);
+                }
+
+                @Override
+                public void onComplete() {
+                    log.info("Collection LLM response complete - stream already closed by onEvent");
+                    // ✅ NO-OP: Stream was already completed by onEvent() when streamEnd=true
+                    // This callback just logs completion, no additional SSE messages needed
+                }
+
+                @Override
+                public void onError(Exception e) {
+                    log.error(e.getMessage(), e);
+                    GenericResponse<AnswerDto> answer = new GenericResponse<>();
+                    answer.setRequestId(dialogueRequest.getRequestId());
+                    answer.setHttpStatusCode(500);
+                    answer.setCode("Error");
+                    answer.setMessage(e.getMessage());
+                    sseCallback.onResponse(answer);
+                }
+            });
+        } catch (Exception e) {
+            log.error(e.getMessage(), e);
+        }
     }
 
     private void buildAnswerOnTurn1(DialogueRequest dialogueRequest, SseCallback<GenericResponse<AnswerDto>> sseCallback) {
@@ -462,17 +633,8 @@ public class ChatbotServiceImpl implements ChatbotService {
 
                 @Override
                 public void onComplete() {
-                    log.info("Receive complete event.");
-                    GenericResponse<AnswerDto> answer = new GenericResponse<>();
-                    answer.setRequestId(dialogueRequest.getRequestId());
-                    AnswerDto answerDto = AnswerDto.builder()
-                            .streamId(dialogueRequest.getStreamId())
-                            .sessionId(dialogueRequest.getSessionId())
-                            .updatedTime(System.currentTimeMillis())
-                            .streamEnd(true)
-                            .build();
-                    answer.setData(answerDto);
-                    sseCallback.onResponse(answer);
+                    log.info("DashScope stream complete - no additional SSE message needed");
+                    // ✅ NO-OP: Stream already completed by onEvent() when streamEnd=true
                 }
 
                 @Override
