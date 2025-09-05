@@ -1,0 +1,38 @@
+{
+  "ROSTemplateFormatVersion": "2015-09-01",
+  "Transform": "Aliyun::Serverless-2018-04-03",
+  "Resources": {
+    "ccc-ai-agent": {
+      "Type": "Aliyun::Serverless::Service",
+      "Properties": {
+        "Description": "AI Collection Agent for Aliyun CCC Integration"
+      },
+      "ccc-handler": {
+        "Type": "Aliyun::Serverless::Function",
+        "Properties": {
+          "Description": "CCC inbound call handler with AI processing",
+          "CodeUri": "./",
+          "Handler": "index.handler",
+          "Runtime": "python3.10",
+          "Timeout": 60,
+          "MemorySize": 512,
+          "EnvironmentVariables": {
+            "DASHSCOPE_API_KEY": "{{DASHSCOPE_API_KEY}}"
+          }
+        },
+        "Events": {
+          "http-trigger": {
+            "Type": "HTTP",
+            "Properties": {
+              "AuthType": "ANONYMOUS",
+              "Methods": [
+                "GET",
+                "POST"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

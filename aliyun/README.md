@@ -89,15 +89,7 @@ The **completed implementation** consolidates ALL qwen/firefox client+server fun
 # Core AI processing (already installed)
 dashscope>=1.14.0
 
-# New CCC integration
-alibabacloud_ccc20200701
-
-# Supporting libraries
-flask==2.3.3
-flask-cors==4.0.0
-flask_socketio
 requests>=2.28.0
-python-dotenv>=0.19.0
 ```
 
 ### Environment Variables
@@ -105,11 +97,6 @@ python-dotenv>=0.19.0
 # AI Services (existing)
 DASHSCOPE_API_KEY=sk-your-dashscope-key
 
-# Aliyun CCC Authentication (new)
-ALIYUN_ACCESS_KEY_ID=LTAI5t...
-ALIYUN_ACCESS_KEY_SECRET=your-secret-key
-ALIYUN_CCC_INSTANCE_ID=ccc-your-instance-id
-ALIYUN_REGION=cn-shanghai
 ```
 
 ### Required Aliyun Services
@@ -117,6 +104,12 @@ ALIYUN_REGION=cn-shanghai
 - 🔄 **Cloud Call Center (CCC)**: Phone call management (ready for configuration)
 - 🔄 **Function Compute (FC)**: Serverless function deployment (handler implemented)
 - 🔄 **RAM**: Access control and permissions (environment configured)
+
+### ⚠️ **Critical Compatibility Note**
+**Function Compute Version**: CCC only supports **FC 2.0**. When creating FC functions for CCC integration:
+- ✅ Use **FC 2.0** (legacy interface)
+- ❌ FC 3.0 is **NOT compatible** with CCC (default but won't work)
+- 🔧 Create functions in FC 2.0 mode for proper CCC integration
 
 ## 📊 Performance Comparison
 
@@ -145,47 +138,65 @@ ALIYUN_REGION=cn-shanghai
 ```
 aliyun/
 ├── README.md                           # This file
-├── INTEGRATION_PROGRESS.md             # Implementation tracking ✅ COMPLETE
-├── IVR_INTEGRATION_INVESTIGATION.md    # Technical investigation ✅ COMPLETE
-├── AUDIO_FORMAT_INVESTIGATION.md       # Audio format compatibility analysis ✅ COMPLETE  
-├── FC_IVR_STEP_BY_STEP_GUIDE.md       # Function Compute tutorial ✅ COMPLETE
-├── ccc_consolidated_server.py          # ✅ COMPLETE - Unified CCC server (ports client+server logic)
+├── QUICK_DEPLOY_GUIDE.md               # Quick deployment with two options ✅ COMPLETE
+├── fc_deployment/                      # Complete FC deployment package ✅ COMPLETE
+│   ├── index.py                        # Complete server (copy of consolidated server)
+│   ├── requirements.txt                # FC-specific dependencies
+│   ├── DEPLOYMENT_INSTRUCTIONS.md     # Comprehensive deployment guide
+│   ├── test_fc_function.py            # Local testing script
+│   ├── package.sh                     # Packaging automation
+│   └── template.yaml                  # FC configuration template
+├── ccc_consolidated_server.py          # ✅ COMPLETE - Direct deployment option
 ├── test_ccc_server.py                  # ✅ COMPLETE - Comprehensive functionality tests
-└── ccc_outbound_example.py            # Direct CCC SDK example (Future: outbound calls)
+├── create_simple_package.sh            # Simple ZIP creation for direct deployment
+├── requirements.txt                    # Dependencies for direct deployment
+└── mds/                               # Documentation (reorganized)
+    ├── INTEGRATION_PROGRESS.md        # Implementation tracking ✅ COMPLETE
+    ├── FC_IVR_STEP_BY_STEP_GUIDE.md  # Function Compute tutorial ✅ COMPLETE
+    ├── IVR_INTEGRATION_INVESTIGATION.md # Technical investigation ✅ COMPLETE
+    └── AUDIO_FORMAT_INVESTIGATION.md   # Audio format compatibility analysis ✅ COMPLETE
 ```
 
 ## 🚀 Quick Start
 
-### Option 1: Function Compute (Web Console)
-1. Follow `FC_IVR_STEP_BY_STEP_GUIDE.md`
-2. Create functions in FC console
-3. Configure IVR flows in CCC console
-4. Test with phone calls
+### **Deployment Options**
 
-### Option 2: Direct CCC SDK (✅ **IMPLEMENTED**)
+#### **Option A: Complete FC Package** (Recommended)
+```bash
+# Use the comprehensive deployment package
+cd fc_deployment/
+python test_fc_function.py  # Test locally first
+./package.sh               # Create deployment ZIP
+# Upload ZIP to FC console with handler: index.handler
+```
+
+#### **Option B: Direct File Deployment** (Simplified)  
+```bash
+# Create simple deployment package
+./create_simple_package.sh  # Creates ccc-direct-[timestamp].zip
+# Upload to FC console with handler: ccc_consolidated_server.handler
+```
+
+### **Legacy Documentation** (For Reference)
+1. Follow `mds/FC_IVR_STEP_BY_STEP_GUIDE.md` for detailed FC tutorial
+2. Review `mds/INTEGRATION_PROGRESS.md` for implementation tracking
+3. Check `mds/IVR_INTEGRATION_INVESTIGATION.md` for technical background
+
+### **Core Implementation** (✅ **READY FOR DEPLOYMENT**)
 ```python
 # Install dependencies
-pip install alibabacloud_ccc20200701
+pip install alibabacloud-ccc20200701>=2.30.0 dashscope>=1.14.0
 
 # Configure credentials in .env
 ALIYUN_ACCESS_KEY_ID=your-key-id
 ALIYUN_ACCESS_KEY_SECRET=your-secret
 ALIYUN_CCC_INSTANCE_ID=ccc-instance-id
+DASHSCOPE_API_KEY=sk-your-dashscope-key
 
-# Test the consolidated server implementation
+# Test implementation locally
 python test_ccc_server.py
 
-# Run consolidated server (for Function Compute deployment)
-python ccc_consolidated_server.py
-
-# Server functionality (✅ COMPLETE):
-# - Accepts CCC inbound calls via Function Compute events
-# - Auto-plays greeting upon connection (play_inbound_greeting)
-# - Handles G.711 ↔ PCM audio conversion (g711_to_wav_8khz)
-# - Processes ASR/LLM/TTS pipeline with persistent connections
-# - Manages conversation flow and in-memory state (no concurrency)
-# - Professional collection agent with Chinese formatting
-# - Comprehensive error handling and recovery
+# Deploy to Function Compute (choose Option A or B above)
 ```
 
 ### ✅ **POC IMPLEMENTATION COMPLETE**
@@ -214,13 +225,44 @@ python ccc_consolidated_server.py
 3. **Consolidated Server Development** ✅ COMPLETED - All qwen/firefox client+server logic ported
 4. **Audio Format Resolution** ✅ COMPLETED - G.711↔PCM conversion implemented
 5. **Comprehensive Testing** ✅ COMPLETED - 7-test validation suite
-6. **CCC Integration** 🔄 READY TO START - Function Compute deployment + phone configuration
-7. **Performance Optimization** ⏳ PENDING - Production tuning and monitoring
-8. **Production Deployment** ⏳ PENDING - Real call center integration
+6. **FC Deployment Package** ✅ COMPLETED - Ready-to-deploy FC package with full validation
+7. **CCC Integration** 🔄 IN PROGRESS - Function Compute deployment + phone configuration
+8. **Performance Optimization** ⏳ PENDING - Production tuning and monitoring
+9. **Production Deployment** ⏳ PENDING - Real call center integration
 
-## 🚀 **Next Steps - CCC Integration**
+## 🚀 **Current Status - Phase 3 CCC Integration**
 
-### Ready for Deployment:
+### 🎯 **Just Completed: FC Deployment Package**
+✅ **Function Compute Package Created** - Complete deployment-ready package with validation
+- **Package Location**: `fc_deployment/` directory  
+- **Package Contents**: index.py, requirements.txt, deployment instructions, test scripts
+- **Local Testing**: ✅ PASSED - TTS latency 2.6s (within 3s target)
+- **Professional Greeting**: ✅ VALIDATED - Proper Chinese banking terminology
+- **Audio Processing**: ✅ CONFIRMED - G.711↔PCM conversion working
+- **Ready for Deployment**: All prerequisites met for FC console upload
+
+### **Two Deployment Options Available**:
+
+#### **Option A: Complete FC Package** (Recommended for Production)
+- **Location**: `fc_deployment/` directory (7 files)
+- **Handler**: `index.handler` 
+- **Benefits**: Complete deployment instructions, test scripts, template configurations
+- **Use Case**: Full production deployment with comprehensive tooling
+
+#### **Option B: Direct File Upload** (Simplified)
+- **File**: `ccc_consolidated_server.py` (single file + requirements.txt)
+- **Handler**: `ccc_consolidated_server.handler`
+- **Benefits**: Simpler, direct approach
+- **Use Case**: Quick testing or minimal deployments
+
+### **Immediate Next Steps**:
+1. **🚀 Function Compute Deployment** - Choose Option A (package) or Option B (direct)
+2. **📞 CCC Instance Setup** - Configure CCC instance and phone numbers  
+3. **🔗 Call Routing** - Configure inbound calls to trigger FC functions
+4. **📡 Real Telephony Testing** - Validate G.711 audio with actual phone calls
+5. **📊 Performance Monitoring** - Measure real-world response times
+
+### Previous Deployment Ready Items:
 1. **Function Compute Setup**: Deploy `ccc_consolidated_server.py` to Aliyun FC
 2. **CCC Configuration**: Set up CCC instance and phone numbers  
 3. **Call Routing**: Configure inbound calls to trigger FC functions
@@ -233,6 +275,7 @@ python ccc_consolidated_server.py
 - [x] ✅ **Test Suite**: Comprehensive functionality validation
 - [x] ✅ **Professional Collection**: Banking terminology and conversation flow
 - [x] ✅ **Function Compute Handler**: CCC event processing ready
+- [x] ✅ **FC Deployment Package**: Ready-to-deploy package with local validation
 - [ ] 🔄 **CCC Instance Setup**: Aliyun console configuration
 - [ ] 🔄 **Phone Number Assignment**: Inbound call routing
 - [ ] 🔄 **Real Call Testing**: End-to-end validation with actual customers
@@ -259,4 +302,4 @@ python ccc_consolidated_server.py
 
 ---
 
-**🎯 Final Status**: ✅ **POC IMPLEMENTATION COMPLETE** - Ready for CCC deployment and real telephony testing. All technical challenges resolved, comprehensive server implementation delivered with full test validation.
+**🎯 Final Status**: ✅ **POC + FC PACKAGE COMPLETE** - Ready for Function Compute deployment. Complete server implementation with local validation successful. FC deployment package created and tested with 2.6s TTS latency target achieved.

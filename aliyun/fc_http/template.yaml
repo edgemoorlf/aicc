@@ -1,0 +1,36 @@
+{
+  "ROSTemplateFormatVersion": "2015-09-01",
+  "Transform": "Aliyun::Serverless-2018-04-03",
+  "Resources": {
+    "ccc-streaming-service": {
+      "Type": "Aliyun::Serverless::Service",
+      "Properties": {
+        "Description": "CCC HTTP Streaming Service for Real-time Audio Processing"
+      },
+      "ccc-streaming-handler": {
+        "Type": "Aliyun::Serverless::Function",
+        "Properties": {
+          "Description": "HTTP streaming handler for CCC bidirectional audio",
+          "CodeUri": "./",
+          "Handler": "index.handler",
+          "Runtime": "python3.10",
+          "Timeout": 600,
+          "MemorySize": 1024,
+          "EnvironmentVariables": {
+            "DASHSCOPE_API_KEY": "{{DASHSCOPE_API_KEY}}"
+          }
+        },
+        "Events": {
+          "http-streaming": {
+            "Type": "HTTP",
+            "Properties": {
+              "AuthType": "ANONYMOUS",
+              "Methods": ["POST"],
+              "Qualifier": "LATEST"
+            }
+          }
+        }
+      }
+    }
+  }
+}

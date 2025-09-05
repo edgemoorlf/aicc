@@ -25,15 +25,6 @@ import asyncio
 from typing import Dict, Optional, Any
 from pathlib import Path
 
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv()
-
-# Aliyun CCC SDK
-from alibabacloud_ccc20200701.client import Client as CccClient
-from alibabacloud_ccc20200701 import models as ccc_models
-from alibabacloud_tea_openapi import models as open_api_models
-
 # DashScope imports
 import dashscope
 from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
@@ -51,26 +42,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables (loaded from .env file)
-DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY')
-ALIYUN_ACCESS_KEY_ID = os.getenv('ALIYUN_ACCESS_KEY_ID')
-ALIYUN_ACCESS_KEY_SECRET = os.getenv('ALIYUN_ACCESS_KEY_SECRET')
-ALIYUN_CCC_INSTANCE_ID = os.getenv('ALIYUN_CCC_INSTANCE_ID')
-ALIYUN_REGION = os.getenv('ALIYUN_REGION', 'cn-shanghai')
-
-# Validate configuration
-if not DASHSCOPE_API_KEY:
-    logger.error('❌ DASHSCOPE_API_KEY not found in environment variables')
-    raise ValueError('Please set DASHSCOPE_API_KEY in .env file')
-
-if not ALIYUN_ACCESS_KEY_ID or not ALIYUN_ACCESS_KEY_SECRET:
-    logger.error('❌ Aliyun access keys not found in environment variables')
-    raise ValueError('Please set ALIYUN_ACCESS_KEY_ID and ALIYUN_ACCESS_KEY_SECRET in .env file')
-
 # Configure DashScope API
-dashscope.api_key = DASHSCOPE_API_KEY
+dashscope.api_key = 'sk-89daa2f5ce954abba7770a87fa342db5'
 logger.info("✅ DashScope API configured for CCC telephony integration")
-logger.info(f"✅ Environment loaded: DashScope key configured, Aliyun region: {ALIYUN_REGION}")
 
 # Global persistent connections and state
 asr_session = None
@@ -83,7 +57,7 @@ voice_settings = {
     'speed': 1.0,
     'pitch': 1.0, 
     'volume': 0.8,
-    'voice': 'Cherry',
+    'voice': 'Dylan',
     'tone': 'professional',
     'emotion': 'professional'
 }
@@ -500,7 +474,7 @@ def generate_telephony_tts(call_id: str, text: str):
         tts_params = {
             "model": "qwen-tts-latest",
             "text": text,
-            "voice": voice_settings.get('voice', 'Cherry'),
+            "voice": voice_settings.get('voice', 'Dylan'),
             "stream": True,
             "format": "pcm",
             "sample_rate": 24000  # Will be downsampled to 8kHz for CCC
@@ -700,7 +674,19 @@ def handler(event, context):
     """Function Compute main handler - Entry point for CCC events"""
     try:
         logger.info(f'📡 Function Compute handler called: {event}')
-        logger.debug(f'📡 Function Compute context: {context}')  # Log context for debugging
+        logger.info(f'📡 Event type: {type(event)}')
+        
+        # Parse event if it's bytes or string
+        if isinstance(event, bytes):
+            import json
+            event = json.loads(event.decode('utf-8'))
+            logger.info('📡 Parsed bytes event to dict')
+        elif isinstance(event, str):
+            import json
+            event = json.loads(event)
+            logger.info('📡 Parsed string event to dict')
+        
+        logger.info(f'📡 Parsed event: {event}')
         
         # Initialize persistent connections if not already done
         if not asr_session and not llm_client:

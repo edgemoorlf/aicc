@@ -1,0 +1,9 @@
+# Function Compute Requirements for CCC AI Collection Agent
+# Core AI processing - REQUIRED
+dashscope>=1.14.0
+
+# Utilities (usually pre-installed in FC, but included for safety)
+requests>=2.28.0
+
+# Audio conversion uses built-in audioop module - no external dependencies needed
+# python-dotenv not needed - FC provides environment variables directly
