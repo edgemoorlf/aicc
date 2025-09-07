@@ -30,6 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.Random;
 
 
 @Service
@@ -39,6 +40,43 @@ public class ChatbotServiceImpl implements ChatbotService {
     // 记录对话轮次
     private final Map<String, List<Message>> sessions = new ConcurrentHashMap<>();
     private final Generation generation = new Generation();
+    private final Random random = new Random();
+    // For inbound call demo, keep the same customer for the session
+    private CustomerInfo customerIncall = DEMO_CUSTOMERS[1];
+
+    // Customer data structure matching qwen/firefox implementation
+    private static final CustomerInfo[] DEMO_CUSTOMERS = {
+        new CustomerInfo("DEMO_001", "张伟", "+86-138-0013-8000", 15000, "2024-06-15", "overdue_payment", 67, 3, "medium"),
+        new CustomerInfo("DEMO_002", "李娜", "+86-139-0013-9000", 8500, "2024-07-20", "payment_plan", 32, 1, "low"),
+        new CustomerInfo("DEMO_003", "王强", "+86-137-0013-7000", 25000, "2024-05-10", "difficult_customer", 103, 7, "high"),
+        new CustomerInfo("DEMO_004", "刘敏", "+86-136-0013-6000", 4200, "2024-07-28", "first_contact", 24, 0, "low")
+    };
+    
+    // Customer information class
+    public static class CustomerInfo {
+        public final String id;
+        public final String name;
+        public final String phone;
+        public final int balance;
+        public final String lastPayment;
+        public final String scenario;
+        public final int daysOverdue;
+        public final int previousContacts;
+        public final String riskLevel;
+        
+        public CustomerInfo(String id, String name, String phone, int balance, String lastPayment, 
+                           String scenario, int daysOverdue, int previousContacts, String riskLevel) {
+            this.id = id;
+            this.name = name;
+            this.phone = phone;
+            this.balance = balance;
+            this.lastPayment = lastPayment;
+            this.scenario = scenario;
+            this.daysOverdue = daysOverdue;
+            this.previousContacts = previousContacts;
+            this.riskLevel = riskLevel;
+        }
+    }
 
     @Override
     public void beginSession(BeginSessionRequest beginSessionRequest, SseCallback<GenericResponse<AnswerDto>> sseCallback) {
@@ -47,10 +85,16 @@ public class ChatbotServiceImpl implements ChatbotService {
             GenericResponse<AnswerDto> answer = new GenericResponse<>();
             answer.setRequestId(beginSessionRequest.getRequestId());
 
-            // Extract customer info from vendorParams for collection context
-            String customerName = "客户";
-            String overdueAmount = "一万五千元"; 
-            String overdueDays = "30天";
+            // Random customer selection for inbound calls (POC)
+            this.customerIncall = DEMO_CUSTOMERS[random.nextInt(DEMO_CUSTOMERS.length)];
+            CustomerInfo selectedCustomer = this.customerIncall;
+            log.info("随机选择客户: {} - 逾期本金: {}元, 逾期天数: {}天", 
+                selectedCustomer.name, selectedCustomer.balance, selectedCustomer.daysOverdue);
+            
+            // Extract customer info from vendorParams or use randomly selected customer
+            String customerName = selectedCustomer.name;
+            String overdueAmount = formatChineseAmount(String.valueOf(selectedCustomer.balance)); 
+            String overdueDays = selectedCustomer.daysOverdue + "天";
             
             if (beginSessionRequest.getVendorParams() != null) {
                 Map<String, String> vendorParams = beginSessionRequest.getVendorParams();
@@ -65,8 +109,8 @@ public class ChatbotServiceImpl implements ChatbotService {
                 }
             }
             
-            // Generate professional collection greeting
-            String collectionGreeting = String.format("您好%s，我是银行催收专员。关于您%s逾期%s的款项，需要和您协商还款事宜。", 
+            // Generate professional collection greeting aligned with qwen-server-firefox.py
+            String collectionGreeting = String.format("您好%s，我是平安银行信用卡中心的催收专员，工号888888。关于您%s逾期%s的欠款，已上报征信系统。请问您现在方便谈论还款安排吗？", 
                     customerName, overdueAmount, overdueDays);
 
             answer.setData(
@@ -125,6 +169,97 @@ public class ChatbotServiceImpl implements ChatbotService {
         return new BaseResponse();
     }
 
+    /**
+     * Build comprehensive collection prompt aligned with qwen-server-firefox.py
+     * @param customerContext Customer information
+     * @param conversationHistory Previous conversation (null for now)
+     * @param customerUtterance What the customer just said
+     * @return Complete collection prompt
+     */
+    private String buildCollectionPrompt(CustomerInfo customerContext, List<String> conversationHistory, String customerUtterance) {
+        // Format Chinese amount like Firefox version
+        String formattedAmount = formatChineseAmountForPrompt(customerContext.balance);
+        
+        // Build conversation history (simplified for now)
+        String conversationText = "\n本次通话记录:\n(开始新对话)\n";
+        
+        String systemPrompt = String.format(
+            "你是平安银行信用卡中心的专业催收专员，正在进行电话催收工作。\n\n" +
+            "客户档案信息:\n" +
+            "- 客户姓名: %s\n" +
+            "- 逾期本金: %s\n" +
+            "- 逾期天数: %d天\n" +
+            "- 联系历史: %d次\n" +
+            "- 风险等级: %s\n\n" +
+            "%s\n" +
+            "基于真实催收对话的标准话术:\n\n" +
+            "【核实确认】\n" +
+            "- \"我看您这边的话在[日期]还了一笔，还了[金额]\"\n" +
+            "- \"当前的话还差[具体金额]，没有还够\"\n\n" +
+            "【理解回应】\n" +
+            "- \"也没有人说有钱不去还这个信用卡的，我可以理解\"\n" +
+            "- \"可以理解，您的还款压力确实也是挺大的\"\n\n" +
+            "【方案提供】\n" +
+            "- \"当前的话还是属于一个内部协商\"\n" +
+            "- \"银行这边可以帮您减免一部分息费\"\n" +
+            "- \"还可以帮您去撤销这个余薪案件的\"\n\n" +
+            "【专业用语】\n" +
+            "- 使用\"您这边的话\"、\"当前的话\"、\"是吧\"等真实催收用语\n" +
+            "- 使用\"内部协商\"、\"余薪案件\"、\"全额减免方案政策\"等专业术语\n\n" +
+            "【重要原则】\n" +
+            "1. 保持理解耐心的态度，避免强硬施压\n" +
+            "2. 用具体数据建立可信度\n" +
+            "3. 提供多种解决方案\n" +
+            "4. 关注客户感受和实际困难\n" +
+            "5. 使用银行专业术语增强权威性\n" +
+            "6. 每一次回答尽量简练，不要超过4句话，最好在1-2句，避免长篇大论，确保客户能听懂\n" +
+            "7. **严禁重复之前已经说过的内容** - 仔细查看通话记录，避免重复相同的话术、问题或信息\n" +
+            "8. **根据对话进展调整策略** - 每次回复都要基于客户的最新回应，推进对话而不是重复\n\n" +
+            "【防重复指南】\n" +
+            "- 如果客户已经表达了某种态度或立场，不要重复询问相同的问题\n" +
+            "- 如果已经提到过某种解决方案，不要再次重复介绍\n" +
+            "- 根据客户的具体回应，选择新的角度或更深入的探讨\n" +
+            "- 避免使用完全相同的开场白或结束语\n\n" +
+            "语言要求:\n" +
+            "- 使用大陆标准普通话，避免台湾用语\n" +
+            "- 金额表达: 15000元说成\"一万五千元\"，不是\"十五千元\"\n" +
+            "- 语气要专业、理解，体现人文关怀\n\n" +
+            "客户说：%s\n\n" +
+            "请以专业催收员的身份，针对客户的话语给出合适的回应，推进催收对话。",
+            customerContext.name,
+            formattedAmount,
+            customerContext.daysOverdue,
+            customerContext.previousContacts,
+            getRiskLevelChinese(customerContext.riskLevel),
+            conversationText,
+            customerUtterance
+        );
+        
+        return systemPrompt;
+    }
+    
+    private String formatChineseAmountForPrompt(int amount) {
+        if (amount >= 10000) {
+            int wan = amount / 10000;
+            int remainder = amount % 10000;
+            if (remainder == 0) {
+                return wan + "万元";
+            } else {
+                return wan + "万" + remainder + "元";
+            }
+        }
+        return amount + "元";
+    }
+    
+    private String getRiskLevelChinese(String riskLevel) {
+        switch (riskLevel) {
+            case "low": return "低风险";
+            case "medium": return "中等风险";
+            case "high": return "高风险";
+            default: return "中等风险";
+        }
+    }
+    
     private String formatChineseAmount(String amount) {
         if (amount == null || amount.trim().isEmpty()) {
             return "一万五千元";
@@ -144,13 +279,6 @@ public class ChatbotServiceImpl implements ChatbotService {
                     return String.format("%.0f万元", wan);
                 } else {
                     return String.format("%.1f万元", wan);
-                }
-            } else if (value >= 1000) {
-                double qian = value / 1000;
-                if (qian == (int)qian) {
-                    return String.format("%.0f千元", qian);
-                } else {
-                    return String.format("%.1f千元", qian);
                 }
             } else {
                 return String.format("%.0f元", value);
@@ -200,17 +328,13 @@ public class ChatbotServiceImpl implements ChatbotService {
     }
 
     private void buildCollectionDefaultAnswer(DialogueRequest dialogueRequest, SseCallback<GenericResponse<AnswerDto>> sseCallback) {
+        // Random customer selection for context (same as beginSession)
+        CustomerInfo selectedCustomer = this.customerIncall;
+        
+        // Build comprehensive collection prompt aligned with qwen-server-firefox.py build_collection_prompt
+        String collectionPrompt = buildCollectionPrompt(selectedCustomer, null, dialogueRequest.getUtterance());
+        
         List<Message> messages = new ArrayList<>();
-        
-        // Build collection-specific prompt
-        String collectionPrompt = String.format(
-            "你是一名专业的银行催收专员，正在与客户进行债务协商对话。请用专业、礼貌但坚定的语气回应客户。" +
-            "要求：1）使用专业的金融术语 2）保持礼貌和尊重 3）提供解决方案 4）回复要简洁，适合语音对话 5）不超过50字\n\n" +
-            "客户说：%s\n\n" +
-            "请回复：", 
-            dialogueRequest.getUtterance()
-        );
-        
         messages.add(Message.builder()
                 .content(collectionPrompt)
                 .role(Role.USER.getValue())

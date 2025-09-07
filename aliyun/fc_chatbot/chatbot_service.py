@@ -4,7 +4,7 @@ Implements DashScope streaming and professional collection logic
 """
 
 import json
-import time
+# import time  # ✅ REMOVED: No longer needed after removing artificial delays
 import logging
 from typing import Dict, Optional, Iterator, List, Any
 from datetime import datetime, timedelta
@@ -150,15 +150,18 @@ class ChatbotService:
         try:
             messages = [{'role': 'user', 'content': prompt}]
             
-            # Call DashScope streaming API
+            # ✅ FIXED: Align API parameters with Java implementation
+            # Java uses: .model("qwen-plus"), .incrementalOutput(false), .resultFormat(TEXT)
             responses = Generation.call(
                 api_key=DASHSCOPE_API_KEY,
-                model='qwen-plus',
+                model='qwen-plus',  # Same as Java
                 messages=messages,
-                stream=True,
-                temperature=0.7,
-                max_tokens=80,  # Keep responses concise for TTS
-                top_p=0.8
+                stream=True,  # Python equivalent of Java's streaming
+                result_format='text',  # Align with Java's ResultFormat.TEXT
+                temperature=0.7,  # Aligned with Java (Java uses default)
+                max_tokens=200,  # ✅ FIXED: Increased from 80 to prevent premature cutoff
+                top_p=0.8,  # Fine for streaming
+                incremental_output=True  # ✅ Better for streaming than Java's false
             )
             
             full_response = ""
@@ -169,6 +172,11 @@ class ChatbotService:
                 if response.status_code == 200:
                     if response.output and hasattr(response.output, 'text'):
                         current_text = response.output.text
+                        
+                        # ✅ FIXED: Check finish_reason for automatic stream termination (align with Java)
+                        finish_reason = getattr(response.output, 'finish_reason', None)
+                        is_stream_end = (finish_reason == 'stop' or finish_reason == 'length')
+                        
                         if current_text and len(current_text) > previous_length:
                             # Extract only the new delta (incremental text)
                             delta_text = current_text[previous_length:]
@@ -176,10 +184,10 @@ class ChatbotService:
                             previous_length = len(current_text)
                             chunk_count += 1
                             
-                            # Create answer DTO with incremental text for streaming
+                            # ✅ FIXED: Use finish_reason for stream_end like Java (.streamEnd("stop".equals(...)))
                             answer = AnswerDto(
                                 answer_text=delta_text,  # Send only the delta, not full text
-                                stream_end=False,
+                                stream_end=is_stream_end,  # ✅ Based on finish_reason, not manual
                                 session_id=request.session_id,
                                 stream_id=request.stream_id,
                                 control_params_list=ControlParams.voice_control(interruptible=True)
@@ -187,23 +195,32 @@ class ChatbotService:
                             
                             yield answer.to_sse_format(request.request_id)
                             
-                            # Small delay between chunks for natural streaming
-                            time.sleep(0.05)
+                            # Log completion when stream ends naturally
+                            if is_stream_end:
+                                logger.info(f"🏁 Stream completed naturally (finish_reason: {finish_reason})")
+                                break
+                            
+                            # ✅ FIXED: Remove artificial delay - let natural streaming timing handle this
+                            # time.sleep(0.05)  # Removed to prevent timing issues
+                        elif is_stream_end and full_response.strip():
+                            # Handle case where stream ends without new text
+                            final_answer = AnswerDto(
+                                answer_text="",
+                                stream_end=True,
+                                session_id=request.session_id,
+                                stream_id=request.stream_id,
+                                control_params_list=ControlParams.voice_control(interruptible=True)
+                            )
+                            yield final_answer.to_sse_format(request.request_id)
+                            logger.info(f"🏁 Stream completed without new text (finish_reason: {finish_reason})")
+                            break
                 else:
                     logger.error(f"❌ DashScope error: {response}")
                     break
             
-            # Final response with stream end flag (empty text, just end signal)
+            # ✅ FIXED: Remove empty final response - let stream end naturally based on finish_reason
+            # Stream completion is handled by the last chunk with proper finish_reason detection
             if full_response.strip():
-                final_answer = AnswerDto(
-                    answer_text="",  # Empty text for stream end signal
-                    stream_end=True,
-                    session_id=request.session_id,
-                    stream_id=request.stream_id,
-                    control_params_list=ControlParams.voice_control(interruptible=True)
-                )
-                yield final_answer.to_sse_format(request.request_id)
-                
                 logger.info(f"🤖 LLM Response ({chunk_count} chunks): {full_response.strip()}")
             else:
                 # Fallback response
@@ -324,26 +341,22 @@ class ChatbotService:
                 # No specific intent - use LLM for natural conversation
                 prompt = self.build_collection_context(request, context)
                 
-                ai_response_chunks = []
+                # ✅ FIXED: Simplify response tracking - pass response directly from stream_qwen_response
+                full_ai_response = ""
                 for chunk in self.stream_qwen_response(prompt, request):
-                    ai_response_chunks.append(chunk)
                     yield chunk
-                
-                # Extract final response for history
-                if ai_response_chunks:
+                    # Extract the actual response text for history (simplified)
                     try:
-                        # Reconstruct full response from chunks
-                        full_response = ""
-                        for chunk_str in ai_response_chunks:
-                            chunk_json = json.loads(chunk_str)
-                            answer_text = chunk_json.get('data', {}).get('answer', '')
-                            if answer_text and not chunk_json.get('data', {}).get('streamEnd', False):
-                                full_response += answer_text
-                        
-                        if full_response:
-                            context.add_dialogue_turn(request.text, full_response)
+                        chunk_json = json.loads(chunk)
+                        chunk_text = chunk_json.get('data', {}).get('answer', '')
+                        if chunk_text and not chunk_json.get('data', {}).get('streamEnd', False):
+                            full_ai_response += chunk_text
                     except:
                         pass
+                
+                # ✅ FIXED: Simplified conversation history update
+                if full_ai_response.strip():
+                    context.add_dialogue_turn(request.text, full_ai_response.strip())
             
         except Exception as e:
             logger.error(f"❌ Dialogue error: {e}")
