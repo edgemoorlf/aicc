@@ -52,7 +52,7 @@ class AICollectionAgentWS {
             speed: 1.0,
             pitch: 1.0, 
             volume: 0.8,
-            voice: 'Cherry',
+            voice: 'Dylan',
             tone: 'professional',
             emotion: 'professional'
         };
