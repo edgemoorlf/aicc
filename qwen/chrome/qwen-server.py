@@ -1,4 +1,4 @@
-# AI催收助手 - Chrome WebM/Opus实现服务器  
+# AI催收助手 - Chrome WebM/Opus实现服务器
 # 支持WebM格式，通过WebM→WAV转换后发送到DashScope
 # 针对Chrome、Edge、Opera浏览器优化
 
@@ -12,10 +12,14 @@ import requests
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+from dotenv import load_dotenv
 import dashscope
 from dashscope import Generation
 from dashscope.audio.asr import Recognition
 import logging
+
+# Load environment variables from .env file
+load_dotenv()
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -144,7 +148,7 @@ def chat():
             })
         
         # 构建对话上下文
-        system_prompt = build_collection_prompt(customer_context, conversation_history, message)
+        system_prompt = build_collection_prompt(customer_context, conversation_history)
         
         # 调用通义千问生成回复
         ai_response = generate_ai_response(system_prompt, message)
@@ -498,72 +502,23 @@ def recognize_speech_dashscope(audio_file):
             webm_file.write(audio_content)
             webm_file_path = webm_file.name
         
-        logger.info(f'WebM/Opus文件大小: {len(audio_content)} bytes location: {webm_file_path}')
-        
+        logger.info(f'WebM文件大小: {len(audio_content)} bytes location: {webm_file_path}')
+
+        # 🎯 DashScope ASR不支持WebM格式，需要转换为WAV
+        # 支持的格式: pcm, wav, mp3, opus, speex, aac, amr
         try:
-            logger.info('尝试WebM格式直接识别...')
-            
-            # 🎯 尝试直接使用WebM格式处理
-            recognition = Recognition(
-                model='paraformer-realtime-8k-v2',
-                format='webm',  # 尝试WebM格式
-                sample_rate=8000,
-                callback=None,
-                # 🎯 高级参数优化
-                semantic_punctuation_enabled=True,  # 智能标点符号
-                max_sentence_silence=2000,          # 2秒静音检测，适应自然对话
-                heartbeat=True                      # 心跳保持长连接稳定
-            )
-            
-            result = recognition.call(webm_file_path)
-            logger.info(f'WebM识别完成，状态: {getattr(result, "status_code", "未知")}')
-            
-            # 检查WebM识别是否成功
-            if hasattr(result, 'get_sentence') and result.get_sentence():
-                sentences = result.get_sentence()
-                logger.info(f'WebM识别成功，识别到 {len(sentences)} 个句子')
-                
-                transcript_parts = []
-                for sentence_obj in sentences:
-                    if isinstance(sentence_obj, dict) and 'text' in sentence_obj:
-                        transcript_parts.append(sentence_obj['text'])
-                
-                transcript = ''.join(transcript_parts)
-                if transcript.strip():
-                    logger.info(f'WebM识别结果: {transcript}')
-                    return transcript.strip()
-            
-            elif hasattr(result, 'output') and result.output and hasattr(result.output, 'sentence') and result.output.sentence:
-                sentences = result.output.sentence
-                transcript_parts = []
-                for sentence_obj in sentences:
-                    if isinstance(sentence_obj, dict) and 'text' in sentence_obj:
-                        transcript_parts.append(sentence_obj['text'])
-                
-                transcript = ''.join(transcript_parts)
-                if transcript.strip():
-                    logger.info(f'WebM识别结果: {transcript}')
-                    return transcript.strip()
-            
-            logger.warning('WebM识别失败，回退到WAV转换')
-            
-        except Exception as webm_error:
-            logger.warning(f'WebM识别异常，回退到WAV转换: {str(webm_error)}')
-        
-        # 回退方案：转换为WAV（如果需要）
-        try:
-            logger.info('使用WebM转WAV + ASR进行识别...')
-            
+            logger.info('转换WebM到WAV格式进行ASR识别...')
+
             # 转换WebM到8kHz WAV
             from pydub import AudioSegment
             wav_file_path = webm_file_path.replace('.webm', '_8khz.wav')
-            
+
             audio = AudioSegment.from_file(webm_file_path, format="webm")
             audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
             audio.export(wav_file_path, format="wav")
-            
+
             logger.info(f'WAV转换完成: {wav_file_path}')
-            
+
             # 使用8kHz模型进行识别
             recognition = Recognition(
                 model='paraformer-realtime-8k-v2',
@@ -575,29 +530,29 @@ def recognize_speech_dashscope(audio_file):
                 max_sentence_silence=2000,          # 2秒静音检测，适应自然对话
                 heartbeat=True                      # 心跳保持长连接稳定
             )
-            
+
             # 进行语音识别
             result = recognition.call(wav_file_path)
             logger.info(f'ASR调用完成，结果状态: {getattr(result, "status_code", "未知")}')
-            
+
             if hasattr(result, 'get_sentence') and result.get_sentence():
                 sentences = result.get_sentence()
                 logger.info(f'识别到 {len(sentences)} 个句子')
-                
+
                 # 合并所有句子的文本
                 transcript_parts = []
                 for sentence_obj in sentences:
                     if isinstance(sentence_obj, dict) and 'text' in sentence_obj:
                         transcript_parts.append(sentence_obj['text'])
-                
+
                 transcript = ''.join(transcript_parts)
                 logger.info(f'识别结果: {transcript}')
                 return transcript.strip()
-                
+
             elif hasattr(result, 'output') and result.output:
                 logger.info(f'ASR output类型: {type(result.output)}')
                 logger.info(f'ASR output内容: {result.output}')
-                
+
                 # 尝试从output中获取结果
                 if hasattr(result.output, 'sentence') and result.output.sentence:
                     sentences = result.output.sentence
@@ -605,18 +560,18 @@ def recognize_speech_dashscope(audio_file):
                     for sentence_obj in sentences:
                         if isinstance(sentence_obj, dict) and 'text' in sentence_obj:
                             transcript_parts.append(sentence_obj['text'])
-                    
+
                     transcript = ''.join(transcript_parts)
                     if transcript:
                         logger.info(f'从output获取识别结果: {transcript}')
                         return transcript.strip()
-                
+
                 elif isinstance(result.output, dict):
                     transcript = result.output.get('sentence', '') or result.output.get('text', '')
                     if transcript:
                         logger.info(f'从字典获取识别结果: {transcript}')
                         return transcript.strip()
-            
+
             logger.error(f'DashScope ASR未返回预期结果: {result}')
             logger.error(f'结果详情 - status_code: {getattr(result, "status_code", "N/A")}, output: {getattr(result, "output", "N/A")}')
             return None
@@ -771,10 +726,10 @@ class StreamingASRSession:
             # 创建回调实例
             callback = StreamingASRCallback(self)
             
-            # 创建Recognition实例 - 使用Opus格式
+            # 创建Recognition实例 - 使用PCM格式
             self.recognition = Recognition(
                 model="paraformer-realtime-8k-v2",
-                format="wav",  # Chrome实现：WebM→WAV转换后使用WAV格式
+                format="pcm",  # 使用PCM格式，因为我们发送的是原始PCM数据（无WAV头）
                 sample_rate=8000,  # 8kHz采样率
                 callback=callback,
                 # 🎯 高级参数优化
@@ -794,26 +749,47 @@ class StreamingASRSession:
             logger.error(f'启动流式ASR失败: {e}')
             return False
     
-    def send_opus_chunk(self, opus_data):
-        """发送Opus音频块"""
-        if self.recognition and self.is_active:
-            try:
-                self.recognition.send_audio_frame(opus_data)
-                logger.debug(f'发送Opus块: {len(opus_data)} bytes')
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f'发送Opus数据失败: {error_msg}')
-                
-                # 🔄 如果ASR会话已停止，自动重启以保持电话连接
-                if "Speech recognition has stopped" in error_msg or "stopped" in error_msg.lower():
-                    logger.info(f'🔄 检测到ASR会话停止，自动重启: {self.session_id}')
-                    if self.restart_recognition():
-                        # 重启成功，重新发送这个Opus块
-                        try:
-                            self.recognition.send_audio_frame(opus_data)
-                            logger.info(f'✅ ASR重启后成功发送Opus块: {len(opus_data)} bytes')
-                        except Exception as retry_error:
-                            logger.error(f'ASR重启后仍然发送失败: {retry_error}')
+    def process_complete_webm(self, webm_data):
+        """接收完整的WebM音频文件，转换为WAV后发送到ASR"""
+        if not self.recognition or not self.is_active:
+            logger.warning('ASR会话未激活，跳过音频处理')
+            return
+
+        try:
+            # 🎯 将完整的WebM文件转换为WAV格式
+            # WebM是容器格式，必须有完整文件才能解析
+            from pydub import AudioSegment
+            import io
+
+            logger.info(f'开始转换WebM到WAV: {len(webm_data)} bytes')
+
+            # 从完整的WebM字节创建AudioSegment
+            webm_io = io.BytesIO(webm_data)
+            audio = AudioSegment.from_file(webm_io, format="webm")
+
+            # 转换为8kHz单声道16位WAV（DashScope ASR要求）
+            audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+
+            # 导出为WAV字节
+            wav_io = io.BytesIO()
+            audio.export(wav_io, format="wav")
+            wav_data = wav_io.getvalue()
+
+            # 跳过WAV头部（44字节），只发送PCM数据
+            pcm_data = wav_data[44:] if len(wav_data) > 44 else wav_data
+
+            # 发送PCM数据到ASR
+            self.recognition.send_audio_frame(pcm_data)
+            logger.info(f'成功发送PCM数据到ASR: {len(pcm_data)} bytes (从 {len(webm_data)} bytes WebM转换)')
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f'WebM转换或ASR发送失败: {error_msg}')
+
+            # 🔄 如果ASR会话已停止，自动重启以保持电话连接
+            if "Speech recognition has stopped" in error_msg or "stopped" in error_msg.lower():
+                logger.info(f'🔄 检测到ASR会话停止，自动重启: {self.session_id}')
+                self.restart_recognition()
     
     def restart_recognition(self):
         """重启流式ASR识别（保持电话通话连接）"""
@@ -832,7 +808,7 @@ class StreamingASRSession:
             
             self.recognition = Recognition(
                 model="paraformer-realtime-8k-v2",
-                format="wav",  # Chrome实现：WebM→WAV转换后使用WAV格式
+                format="pcm",  # 使用PCM格式，因为我们发送的是原始PCM数据（无WAV头）
                 sample_rate=8000,
                 callback=callback,
                 # 🎯 高级参数优化
@@ -978,36 +954,36 @@ def handle_start_streaming_asr(data):
             'error': str(e)
         })
 
-@socketio.on('send_opus_chunk')
-def handle_send_opus_chunk(data):
-    """接收并处理OGG/Opus音频块"""
+@socketio.on('send_audio_chunk')
+def handle_send_audio_chunk(data):
+    """接收完整的WebM音频文件，转换为WAV后发送到ASR"""
     try:
         session_id = data.get('session_id')
-        opus_data = data.get('opus_data')  # 应该是字节数组或二进制数据
-        
-        if not session_id or not opus_data:
-            logger.warning('缺少session_id或opus_data')
+        audio_data = data.get('audio_data')  # 完整的WebM文件字节数组
+
+        if not session_id or not audio_data:
+            logger.warning('缺少session_id或audio_data')
             return
-            
+
         # 查找会话
         asr_session = active_asr_sessions.get(session_id)
         if not asr_session:
             logger.warning(f'未找到ASR会话: {session_id}')
             return
-            
-        # 转换Opus数据格式
-        if isinstance(opus_data, list):
-            opus_bytes = bytes(opus_data)
+
+        # 转换数据格式
+        if isinstance(audio_data, list):
+            audio_bytes = bytes(audio_data)
         else:
-            opus_bytes = opus_data
-            
-        # 🎯 发送到ASR - 直接使用OGG/Opus格式
-        asr_session.send_opus_chunk(opus_bytes)
-        
-        logger.debug(f'处理Opus块: 会话{session_id}, 大小{len(opus_bytes)} bytes')
-        
+            audio_bytes = audio_data
+
+        logger.info(f'收到完整WebM音频: 会话{session_id}, 大小{len(audio_bytes)} bytes')
+
+        # 🎯 转换完整的WebM文件到WAV后发送到ASR
+        asr_session.process_complete_webm(audio_bytes)
+
     except Exception as e:
-        logger.error(f'处理Opus音频块失败: {e}')
+        logger.error(f'处理WebM音频块失败: {e}')
 
 @socketio.on('stop_streaming_asr')
 def handle_stop_streaming_asr(data):
@@ -1069,7 +1045,7 @@ def handle_chat_message(data):
             return
         
         # 构建对话上下文
-        system_prompt = build_collection_prompt(customer_context, conversation_history, message)
+        system_prompt = build_collection_prompt(customer_context, conversation_history)
         
         # 调用通义千问生成回复
         ai_response, llm_latency = generate_ai_response(system_prompt, message)

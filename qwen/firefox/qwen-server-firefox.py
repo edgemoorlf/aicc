@@ -19,6 +19,10 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # DashScope imports
 import dashscope

@@ -761,7 +761,9 @@ class AICollectionAgentWS {
     }
 
     getBestMediaRecorderFormat() {
-        // 基于兼容性分析的格式选择策略
+        // 浏览器MediaRecorder格式选择策略
+        // 注意: 浏览器录制WebM/Opus格式，服务器会转换为WAV后发送到DashScope ASR
+        // DashScope ASR支持: pcm, wav, mp3, opus, speex, aac, amr (不支持WebM容器格式)
         const userAgent = navigator.userAgent;
         
         // Safari兼容性检查
@@ -1144,7 +1146,7 @@ class AICollectionAgentWS {
         try {
             // 使用流式ASR处理音频
             if (this.isStreamingASRActive && this.currentASRSessionId) {
-                await this.processAudioChunksForStreamingOpus();  // 🔄 使用WebM处理
+                await this.processAudioChunksForStreaming();  // 🔄 WebM → 服务器转WAV → ASR
             } else {
                 // 回退到批处理ASR（用于兼容性）
                 await this.processAudioChunksBatch();
@@ -1157,9 +1159,10 @@ class AICollectionAgentWS {
     }
 
     async processAudioChunksBatch() {
-        // 原有的批处理ASR逻辑（作为备用）
+        // 批处理ASR逻辑（作为备用）
+        // 浏览器录制WebM/Opus格式，服务器会转换为WAV后发送到DashScope ASR
         try {
-            // 合并音频数据 - 现在是WebM/Opus格式
+            // 合并音频数据 - WebM/Opus格式（服务器会转换为WAV）
             const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm;codecs=opus' });
             
             // 停止任何当前播放的音频
@@ -1245,62 +1248,51 @@ class AICollectionAgentWS {
         }
     }
     
-    async processAudioChunksForStreamingOpus() {
-        // 🎯 直接处理OGG/Opus数据 - 无需WebM→PCM转换
+    async processAudioChunksForStreaming() {
+        // 🎯 处理WebM音频数据，发送到服务器进行WAV转换和ASR
+        // DashScope ASR支持: pcm, wav, mp3, opus, speex, aac, amr (不支持WebM)
         if (this.audioChunks.length === 0) return;
 
         try {
-            // 合并OGG/Opus音频数据
-            const audioBlob = new Blob(this.audioChunks, { type: 'audio/ogg;codecs=opus' });
-            this.debugLog(`开始处理OGG/Opus音频用于流式ASR: ${audioBlob.size} bytes`);
-            
+            // 合并WebM音频数据
+            const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm;codecs=opus' });
+            this.debugLog(`开始处理WebM音频用于流式ASR: ${audioBlob.size} bytes`);
+
             if (audioBlob.size > 0 && this.currentASRSessionId) {
-                // 🚀 直接发送OGG/Opus数据到服务器
-                await this.sendOpusDataToASR(audioBlob);
+                // 🚀 发送WebM数据到服务器（服务器会转换为WAV）
+                await this.sendAudioDataToASR(audioBlob);
             }
-            
+
         } catch (error) {
             console.error('流式ASR音频处理失败:', error);
             this.debugLog('流式ASR音频处理失败: ' + error.message);
         }
     }
     
-    async sendOpusDataToASR(audioBlob) {
-        // 直接发送OGG/Opus数据到服务器
+    async sendAudioDataToASR(audioBlob) {
+        // 发送完整的WebM音频数据到服务器（服务器会转换为WAV后发送到DashScope ASR）
+        // 注意: WebM是容器格式，必须发送完整文件才能解析，不能分块发送
         try {
-            this.debugLog('直接发送OGG/Opus数据到ASR...');
-            
-            // 读取OGG/Opus二进制数据
+            this.debugLog('发送完整WebM音频数据到服务器进行ASR...');
+
+            // 读取完整的WebM二进制数据
             const arrayBuffer = await audioBlob.arrayBuffer();
-            const opusData = new Uint8Array(arrayBuffer);
-            
-            // 分块发送OGG/Opus数据（保持合理的块大小以确保及时传输）
-            const chunkSize = 4096; // 4KB块大小，适合网络传输
-            const totalChunks = Math.ceil(opusData.length / chunkSize);
-            
-            this.debugLog(`开始发送OGG/Opus数据: ${opusData.length} bytes, 分为 ${totalChunks} 个块`);
-            
-            for (let i = 0; i < opusData.length; i += chunkSize) {
-                const chunk = opusData.slice(i, i + chunkSize);
-                const chunkIndex = Math.floor(i / chunkSize) + 1;
-                
-                // 发送Opus块到服务器
-                this.socket.emit('send_opus_chunk', {
-                    session_id: this.currentASRSessionId,
-                    opus_data: Array.from(chunk)  // 转换为数组以便JSON传输
-                });
-                
-                this.debugLog(`发送OGG/Opus块 ${chunkIndex}/${totalChunks}: ${chunk.length} bytes`);
-                
-                // 添加小延迟避免网络拥塞
-                await new Promise(resolve => setTimeout(resolve, 5));
-            }
-            
-            this.debugLog('OGG/Opus数据发送完成');
-            
+            const audioData = new Uint8Array(arrayBuffer);
+
+            this.debugLog(`发送完整WebM音频: ${audioData.length} bytes`);
+
+            // 发送完整的WebM数据到服务器（不分块，因为WebM需要完整文件才能解析）
+            this.socket.emit('send_audio_chunk', {
+                session_id: this.currentASRSessionId,
+                audio_data: Array.from(audioData),  // 转换为数组以便JSON传输
+                is_complete: true  // 标记这是完整的WebM文件
+            });
+
+            this.debugLog('完整WebM音频数据发送完成');
+
         } catch (error) {
-            console.error('发送OGG/Opus数据失败:', error);
-            this.debugLog('OGG/Opus数据发送失败: ' + error.message);
+            console.error('发送音频数据失败:', error);
+            this.debugLog('音频数据发送失败: ' + error.message);
         }
     }
     
