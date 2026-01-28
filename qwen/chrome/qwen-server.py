@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 import dashscope
 from dashscope import Generation
 from dashscope.audio.asr import Recognition
+from dashscope.common.error import InvalidParameter
 import logging
 
 # Load environment variables from .env file
@@ -41,6 +42,119 @@ dashscope.api_key = DASHSCOPE_API_KEY
 conversation_history = []
 active_asr_sessions = {}  # 存储活跃的流式ASR会话
 client_voice_settings = {}  # 存储客户端语音设置
+
+# ====== Phase 2: ASR Post-Processing ======
+
+def post_process_asr_result(text):
+    """
+    Phase 2: ASR后处理 - 针对催收场景的常见识别错误修正
+
+    处理中文金融术语、方言、数字表达等常见ASR错误
+    """
+    if not text:
+        return text
+
+    # 1. 金融术语标准化
+    financial_corrections = {
+        # 金额表达标准化
+        '一万五': '15000元',
+        '两万': '20000元',
+        '三万': '30000元',
+        '五千': '5000元',
+        '两千': '2000元',
+        '一千': '1000元',
+
+        # 催收术语纠正
+        '还不起': '还不起',  # 确保保留
+        '换不起': '还不起',  # 常见错误
+        '环不起': '还不起',
+        '还款': '还款',
+        '换款': '还款',
+        '欠款': '欠款',
+        '前款': '欠款',
+        '逾期': '逾期',
+        '预期': '逾期',
+        '分期': '分期',
+        '分齐': '分期',
+        '本金': '本金',
+        '本进': '本金',
+        '利息': '利息',
+        '利西': '利息',
+        '罚息': '罚息',
+        '发息': '罚息',
+    }
+
+    # 2. 方言标准化（四川、广东等地方言）
+    dialect_corrections = {
+        '没得钱': '没钱',
+        '晓得': '知道',
+        '不晓得': '不知道',
+        '莫得': '没有',
+        '搞不赢': '做不到',
+        '整不好': '不行',
+    }
+
+    # 3. 常见口语表达标准化
+    colloquial_corrections = {
+        '嗯嗯': '嗯',
+        '啊啊': '啊',
+        '哦哦': '哦',
+        '好好好': '好',
+        '对对对': '对',
+        '是是是': '是',
+    }
+
+    # 应用所有修正
+    result = text
+    for wrong, correct in {**financial_corrections, **dialect_corrections, **colloquial_corrections}.items():
+        result = result.replace(wrong, correct)
+
+    # 4. 数字格式标准化（保留中文数字但确保一致性）
+    # 例如："一万五千" -> "15000元"
+    import re
+
+    # 匹配常见的中文金额表达
+    amount_patterns = [
+        (r'(\d+)万(\d+)千', lambda m: f'{int(m.group(1)) * 10000 + int(m.group(2)) * 1000}元'),
+        (r'(\d+)万', lambda m: f'{int(m.group(1)) * 10000}元'),
+        (r'(\d+)千', lambda m: f'{int(m.group(1)) * 1000}元'),
+    ]
+
+    for pattern, replacement in amount_patterns:
+        result = re.sub(pattern, replacement, result)
+
+    return result.strip()
+
+def extract_confidence_score(result):
+    """
+    Phase 2: 提取ASR结果的置信度分数
+
+    DashScope ASR结果可能包含confidence字段
+    """
+    try:
+        # 尝试从result对象中提取confidence
+        if hasattr(result, 'confidence'):
+            return result.confidence
+
+        # 如果result是字典
+        if isinstance(result, dict):
+            return result.get('confidence', 1.0)
+
+        # 尝试从sentence中提取
+        sentence = result.get_sentence() if hasattr(result, 'get_sentence') else None
+        if sentence:
+            if isinstance(sentence, dict):
+                return sentence.get('confidence', 1.0)
+            elif isinstance(sentence, list) and len(sentence) > 0:
+                last_sentence = sentence[-1]
+                if isinstance(last_sentence, dict):
+                    return last_sentence.get('confidence', 1.0)
+
+        # 默认返回1.0（高置信度）
+        return 1.0
+    except Exception as e:
+        logger.warning(f'提取置信度失败: {e}')
+        return 1.0
 
 # 静态文件服务
 @app.route('/')
@@ -520,21 +634,21 @@ def recognize_speech_dashscope(audio_file):
         try:
             logger.info('转换WebM到WAV格式进行ASR识别...')
 
-            # 转换WebM到8kHz WAV
+            # 转换WebM到16kHz WAV
             from pydub import AudioSegment
-            wav_file_path = webm_file_path.replace('.webm', '_8khz.wav')
+            wav_file_path = webm_file_path.replace('.webm', '_16khz.wav')
 
             audio = AudioSegment.from_file(webm_file_path, format="webm")
-            audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+            audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
             audio.export(wav_file_path, format="wav")
 
             logger.info(f'WAV转换完成: {wav_file_path}')
 
-            # 使用8kHz模型进行识别
+            # 使用16kHz模型进行识别
             recognition = Recognition(
-                model='paraformer-realtime-8k-v2',
+                model='paraformer-realtime-v2',
                 format='wav',
-                sample_rate=8000,
+                sample_rate=16000,
                 callback=None,
                 # 🎯 高级参数优化
                 semantic_punctuation_enabled=True,  # 智能标点符号
@@ -557,8 +671,17 @@ def recognize_speech_dashscope(audio_file):
                         transcript_parts.append(sentence_obj['text'])
 
                 transcript = ''.join(transcript_parts)
-                logger.info(f'识别结果: {transcript}')
-                return transcript.strip()
+
+                # Phase 2: 应用ASR后处理
+                original_transcript = transcript
+                processed_transcript = post_process_asr_result(transcript)
+
+                if original_transcript != processed_transcript:
+                    logger.info(f'📝 批量ASR后处理: "{original_transcript}" -> "{processed_transcript}"')
+                else:
+                    logger.info(f'识别结果: {processed_transcript}')
+
+                return processed_transcript.strip()
 
             elif hasattr(result, 'output') and result.output:
                 logger.info(f'ASR output类型: {type(result.output)}')
@@ -574,14 +697,18 @@ def recognize_speech_dashscope(audio_file):
 
                     transcript = ''.join(transcript_parts)
                     if transcript:
-                        logger.info(f'从output获取识别结果: {transcript}')
-                        return transcript.strip()
+                        # Phase 2: 应用ASR后处理
+                        processed_transcript = post_process_asr_result(transcript)
+                        logger.info(f'从output获取识别结果: {processed_transcript}')
+                        return processed_transcript.strip()
 
                 elif isinstance(result.output, dict):
                     transcript = result.output.get('sentence', '') or result.output.get('text', '')
                     if transcript:
-                        logger.info(f'从字典获取识别结果: {transcript}')
-                        return transcript.strip()
+                        # Phase 2: 应用ASR后处理
+                        processed_transcript = post_process_asr_result(transcript)
+                        logger.info(f'从字典获取识别结果: {processed_transcript}')
+                        return processed_transcript.strip()
 
             logger.error(f'DashScope ASR未返回预期结果: {result}')
             logger.error(f'结果详情 - status_code: {getattr(result, "status_code", "N/A")}, output: {getattr(result, "output", "N/A")}')
@@ -759,8 +886,8 @@ class StreamingASRSession:
             webm_io = io.BytesIO(webm_data)
             audio = AudioSegment.from_file(webm_io, format="webm")
 
-            # 转换为8kHz单声道16位PCM（DashScope ASR要求）
-            audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+            # 转换为16kHz单声道16位PCM（DashScope ASR要求）
+            audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
 
             # 获取原始PCM数据
             pcm_data = audio.raw_data
@@ -777,17 +904,63 @@ class StreamingASRSession:
             import traceback
             logger.error(f'错误详情: {traceback.format_exc()}')
 
+    def process_pcm_chunk_streaming(self, pcm_chunk):
+        """Phase 3: 处理实时PCM音频块进行真正的流式ASR"""
+        if not self.is_active:
+            logger.warning('ASR会话未激活，跳过PCM块处理')
+            return
+
+        try:
+            # 如果recognition还未创建，创建并启动
+            if not self.recognition:
+                logger.info(f'Phase 3: 启动真正的流式ASR会话: {self.session_id}')
+
+                # 创建回调实例
+                callback = StreamingASRCallback(self)
+
+                # 创建Recognition实例
+                self.recognition = Recognition(
+                    model="paraformer-realtime-v2",
+                    format="pcm",
+                    sample_rate=16000,
+                    callback=callback,
+                    semantic_punctuation_enabled=True,
+                    max_sentence_silence=2500,  # 增加到2.5秒以匹配VAD静音超时，避免过早停止
+                    disfluency_removal_enabled=False  # Phase 3: 保留犹豫以捕捉情绪
+                )
+
+                # 启动识别
+                self.recognition.start()
+                logger.info(f'✓ Phase 3: 真正的流式ASR已启动')
+
+            # 发送PCM块到ASR
+            self.recognition.send_audio_frame(pcm_chunk)
+            logger.debug(f'Phase 3: 发送PCM块 {len(pcm_chunk)} bytes')
+
+        except InvalidParameter as e:
+            # Recognition已停止，这是正常情况（语音结束或超时）
+            if 'stopped' in str(e).lower():
+                logger.debug(f'Phase 3: Recognition已停止，忽略后续PCM块')
+                # 清理recognition引用，下次录音会重新创建
+                self.recognition = None
+            else:
+                logger.error(f'Phase 3: ASR参数错误: {e}')
+        except Exception as e:
+            logger.error(f'Phase 3: 实时PCM块处理失败: {e}')
+            import traceback
+            logger.error(f'错误详情: {traceback.format_exc()}')
+
     def _process_pcm_with_streaming_asr(self, pcm_data):
-        """使用流式ASR处理PCM数据"""
+        """使用流式ASR处理PCM数据（批处理模式）"""
         try:
             # 创建回调实例
             callback = StreamingASRCallback(self)
 
             # 创建新的Recognition实例
             self.recognition = Recognition(
-                model="paraformer-realtime-8k-v2",
+                model="paraformer-realtime-v2",
                 format="pcm",
-                sample_rate=8000,
+                sample_rate=16000,
                 callback=callback,
                 semantic_punctuation_enabled=True,
                 max_sentence_silence=800  # 减少静音检测时间，加快响应
@@ -798,8 +971,8 @@ class StreamingASRSession:
             self.recognition.start()
 
             # 分块发送PCM数据（模拟实时流）
-            # DashScope建议每次发送3200字节（100ms的8kHz 16bit单声道音频）
-            chunk_size = 3200  # 100ms of 8kHz 16-bit mono audio
+            # DashScope建议每次发送6400字节（100ms的16kHz 16bit单声道音频）
+            chunk_size = 6400  # 100ms of 16kHz 16-bit mono audio
             total_chunks = (len(pcm_data) + chunk_size - 1) // chunk_size
 
             logger.info(f'开始发送PCM数据: {len(pcm_data)} bytes, {total_chunks} chunks')
@@ -855,6 +1028,17 @@ class StreamingASRCallback:
         # 保存结果
         self.session.results.append(result)
 
+        # Phase 2: 提取置信度分数
+        confidence = extract_confidence_score(result)
+
+        # Phase 2: 置信度过滤和警告
+        if confidence < 0.6:
+            logger.warning(f'⚠️ 低置信度ASR结果: {confidence:.2f} - 可能需要用户重复')
+        elif confidence < 0.8:
+            logger.info(f'ℹ️ 中等置信度ASR结果: {confidence:.2f}')
+        else:
+            logger.info(f'✓ 高置信度ASR结果: {confidence:.2f}')
+
         # 解析结果
         sentence = result.get_sentence() if hasattr(result, 'get_sentence') else None
 
@@ -874,10 +1058,20 @@ class StreamingASRCallback:
                     is_end = last_sentence.get('end', False) or last_sentence.get('sentence_end', False)
 
             if text and is_end:
-                logger.info(f'流式ASR完整句子: {text}')
-                # 发送用户消息事件
+                # Phase 2: 应用ASR后处理
+                original_text = text
+                processed_text = post_process_asr_result(text)
+
+                if original_text != processed_text:
+                    logger.info(f'📝 ASR后处理: "{original_text}" -> "{processed_text}"')
+                else:
+                    logger.info(f'流式ASR完整句子: {processed_text}')
+
+                # 发送用户消息事件（使用处理后的文本）
                 socketio.emit('user_speech_recognized', {
-                    'text': text,
+                    'text': processed_text,
+                    'original_text': original_text,
+                    'confidence': confidence,
                     'timestamp': time.time()
                 }, room=self.session.client_sid)
 
@@ -963,22 +1157,86 @@ def handle_send_audio_chunk(data):
     except Exception as e:
         logger.error(f'处理WebM音频块失败: {e}')
 
+@socketio.on('send_pcm_chunk')
+def handle_send_pcm_chunk(data):
+    """Phase 3: 接收实时PCM音频块进行真正的流式ASR"""
+    try:
+        session_id = data.get('session_id')
+        pcm_data = data.get('pcm_data')  # PCM字节数组
+        sample_rate = data.get('sample_rate', 16000)
+        is_streaming = data.get('is_streaming', True)
+
+        if not session_id or not pcm_data:
+            logger.warning('缺少session_id或pcm_data')
+            return
+
+        # 查找会话
+        asr_session = active_asr_sessions.get(session_id)
+        if not asr_session:
+            logger.warning(f'未找到ASR会话: {session_id}')
+            return
+
+        # 转换数据格式
+        if isinstance(pcm_data, list):
+            pcm_bytes = bytes(pcm_data)
+        else:
+            pcm_bytes = pcm_data
+
+        logger.debug(f'收到PCM音频块: 会话{session_id}, 大小{len(pcm_bytes)} bytes')
+
+        # Phase 3: 直接发送PCM数据到流式ASR
+        asr_session.process_pcm_chunk_streaming(pcm_bytes)
+
+    except Exception as e:
+        logger.error(f'处理PCM音频块失败: {e}')
+
+@socketio.on('finalize_streaming_asr')
+def handle_finalize_streaming_asr(data):
+    """Phase 3: 完成流式ASR会话（发送停止信号但保持会话）"""
+    try:
+        session_id = data.get('session_id')
+
+        if not session_id:
+            logger.warning('完成ASR请求缺少session_id')
+            return
+
+        # 查找会话
+        asr_session = active_asr_sessions.get(session_id)
+        if asr_session and asr_session.recognition:
+            # 发送停止信号到ASR（告诉它音频已结束）
+            logger.info(f'Phase 3: 完成流式ASR会话: {session_id}')
+            try:
+                asr_session.recognition.stop()
+            except Exception as e:
+                logger.warning(f'停止Recognition时出错: {e}')
+
+            # 清理recognition引用，下次录音会创建新实例
+            asr_session.recognition = None
+
+            emit('asr_finalized', {
+                'session_id': session_id,
+                'status': 'success'
+            })
+
+    except Exception as e:
+        logger.error(f'完成流式ASR会话失败: {e}')
+
 @socketio.on('stop_streaming_asr')
 def handle_stop_streaming_asr(data):
     """停止流式ASR会话"""
     try:
         session_id = data.get('session_id')
-        
+
         if not session_id:
             logger.warning('停止ASR请求缺少session_id')
             return
-            
+
         # 查找并停止会话
         asr_session = active_asr_sessions.get(session_id)
         if asr_session:
             asr_session.stop_recognition()
             del active_asr_sessions[session_id]
-            
+
             emit('asr_session_stopped', {
                 'session_id': session_id
             })

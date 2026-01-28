@@ -59,6 +59,12 @@ class AICollectionAgentWS {
         this.isStreamingASRActive = false;
         this.streamingASRResults = [];
 
+        // Phase 3: 真正的流式ASR配置
+        this.enableTrueStreaming = true;  // 启用真正的实时流式ASR
+        this.streamingAudioContext = null;  // 专用于流式录音的AudioContext
+        this.audioProcessor = null;
+        this.audioSource = null;
+
         // 语音控制设置
         this.voiceSettings = {
             speed: 1.0,
@@ -1083,10 +1089,10 @@ class AICollectionAgentWS {
         try {
             this.debugLog('正在启动持续监听...');
             
-            // 获取麦克风权限 - 配置为8kHz以匹配DashScope 8k模型
-            this.audioStream = await navigator.mediaDevices.getUserMedia({ 
+            // 获取麦克风权限 - 配置为16kHz以匹配DashScope 16k模型
+            this.audioStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
-                    sampleRate: 8000,  // 改为8kHz匹配paraformer-realtime-8k-v2
+                    sampleRate: 16000,  // 升级到16kHz匹配paraformer-realtime-v2
                     channelCount: 1,
                     echoCancellation: true,
                     noiseSuppression: true,
@@ -1097,7 +1103,7 @@ class AICollectionAgentWS {
                     googHighpassFilter: true, // 高通滤波器，过滤低频噪音
                     googTypingNoiseDetection: true, // 键盘噪音检测
                     googAudioMirroring: false
-                } 
+                }
             });
 
             // 创建音频分析器用于语音活动检测
@@ -1158,21 +1164,21 @@ class AICollectionAgentWS {
             
             // 计算音频能量
             const average = dataArray.reduce((sum, value) => sum + value, 0) / bufferLength;
-            const threshold = 60; // 提高语音检测阈值，避免背景噪音 (原来是30)
-            
+            const threshold = 45; // 降低阈值以捕获轻声或压力下的语音（原来是60）
+
             if (average > threshold) {
                 // 检测到语音
                 if (!speechDetected) {
                     speechDetected = true;
                     speechStartTime = Date.now();
                     silenceStart = null;
-                    
+
                     // 如果代理正在说话，立即停止
                     if (this.isPlayingAudio) {
                         this.stopCurrentAudio();
                         this.debugLog('客户开始说话，中断代理音频');
                     }
-                    
+
                     this.startRecording();
                     this.debugLog('检测到语音，开始录音');
                 }
@@ -1181,13 +1187,13 @@ class AICollectionAgentWS {
                 if (speechDetected && !silenceStart) {
                     silenceStart = Date.now();
                 }
-                
-                // 静音超过2秒，停止录音（增加到2秒避免过早停止）
-                if (speechDetected && silenceStart && Date.now() - silenceStart > 2000) {
+
+                // 静音超过2.5秒，停止录音（增加到2.5秒允许自然停顿）
+                if (speechDetected && silenceStart && Date.now() - silenceStart > 2500) {
                     const speechDuration = Date.now() - speechStartTime;
-                    
-                    // 只处理超过800ms的语音（过滤掉很短的噪音）
-                    if (speechDuration >= 800) {
+
+                    // 只处理超过500ms的语音（捕获短回应如"嗯"、"好的"）
+                    if (speechDuration >= 500) {
                         speechDetected = false;
                         silenceStart = null;
                         speechStartTime = null;
@@ -1200,9 +1206,7 @@ class AICollectionAgentWS {
                         speechStartTime = null;
                         this.debugLog(`语音过短(${speechDuration}ms)，忽略录音`);
                         if (this.isRecording) {
-                            this.mediaRecorder.stop();
-                            this.isRecording = false;
-                            this.audioChunks = []; // 清空音频数据
+                            this.cancelRecording();
                         }
                     }
                 }
@@ -1235,36 +1239,28 @@ class AICollectionAgentWS {
         try {
             // 在持续监听模式下，音频流已经存在
             if (!this.audioStream) {
-                this.audioStream = await navigator.mediaDevices.getUserMedia({ 
+                this.audioStream = await navigator.mediaDevices.getUserMedia({
                     audio: {
-                        sampleRate: 8000,  // 改为8kHz匹配paraformer-realtime-8k-v2
+                        sampleRate: 16000,  // 升级到16kHz匹配paraformer-realtime-v2
                         channelCount: 1,
                         echoCancellation: true,
                         noiseSuppression: true
-                    } 
+                    }
                 });
             }
 
-            // 创建MediaRecorder - 使用优化的格式检测
-            const mimeType = this.getBestMediaRecorderFormat();
-            this.mediaRecorder = new MediaRecorder(this.audioStream, {
-                mimeType: mimeType
-            });
+            // Phase 3: 启动真正的流式ASR会话
+            if (!this.isStreamingASRActive) {
+                await this.startStreamingASR();
+            }
 
-            this.audioChunks = [];
-            this.isRecording = true;
-
-            this.mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
-                    this.audioChunks.push(event.data);
-                }
-            };
-
-            this.mediaRecorder.onstop = () => {
-                this.processAudioChunks();
-            };
-
-            this.mediaRecorder.start(100);
+            // Phase 3: 使用Web Audio API进行真正的实时流式处理
+            if (this.enableTrueStreaming) {
+                await this.startTrueStreamingRecording();
+            } else {
+                // 回退到批处理模式
+                await this.startBatchRecording();
+            }
 
             // 更新UI (仅在非持续监听模式下)
             if (!this.isListening) {
@@ -1281,15 +1277,141 @@ class AICollectionAgentWS {
         }
     }
 
+    async startBatchRecording() {
+        // 批处理录音模式（原有实现）
+        const mimeType = this.getBestMediaRecorderFormat();
+        this.mediaRecorder = new MediaRecorder(this.audioStream, {
+            mimeType: mimeType
+        });
+
+        this.audioChunks = [];
+        this.isRecording = true;
+
+        this.mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+                this.audioChunks.push(event.data);
+            }
+        };
+
+        this.mediaRecorder.onstop = () => {
+            this.processAudioChunks();
+        };
+
+        this.mediaRecorder.start(100);
+    }
+
+    async startTrueStreamingRecording() {
+        // Phase 3: 真正的流式录音 - 使用Web Audio API捕获PCM数据
+        this.isRecording = true;
+        this.audioChunks = [];
+
+        try {
+            // 创建专用的Web Audio上下文用于流式录音（不影响VAD的audioContext）
+            const streamingContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 16000
+            });
+
+            // 创建音频源
+            const source = streamingContext.createMediaStreamSource(this.audioStream);
+
+            // 创建ScriptProcessor用于实时处理音频
+            const bufferSize = 4096;  // 256ms at 16kHz
+            const processor = streamingContext.createScriptProcessor(bufferSize, 1, 1);
+
+            processor.onaudioprocess = (e) => {
+                if (!this.isRecording) return;
+
+                // 获取PCM数据
+                const inputData = e.inputBuffer.getChannelData(0);
+
+                // 转换为16位PCM
+                const pcm16 = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+
+                // Phase 3: 立即发送PCM数据到服务器进行流式ASR
+                if (this.currentASRSessionId) {
+                    this.sendPCMChunkToASR(pcm16);
+                }
+            };
+
+            // 连接音频节点
+            source.connect(processor);
+            processor.connect(streamingContext.destination);
+
+            // 保存引用以便停止时清理（使用专用变量，不覆盖VAD的audioContext）
+            this.streamingAudioContext = streamingContext;
+            this.audioProcessor = processor;
+            this.audioSource = source;
+
+            this.debugLog('✓ Phase 3: 真正的流式录音已启动');
+
+        } catch (error) {
+            console.error('启动真正的流式录音失败:', error);
+            this.debugLog('流式录音失败，回退到批处理模式');
+            // 回退到批处理模式
+            await this.startBatchRecording();
+        }
+    }
+
+    sendPCMChunkToASR(pcm16Data) {
+        // Phase 3: 发送PCM音频块到服务器进行实时ASR
+        try {
+            if (!this.currentASRSessionId) return;
+
+            // 转换为字节数组
+            const pcmBytes = new Uint8Array(pcm16Data.buffer);
+
+            // 发送到服务器
+            this.socket.emit('send_pcm_chunk', {
+                session_id: this.currentASRSessionId,
+                pcm_data: Array.from(pcmBytes),
+                sample_rate: 16000,
+                is_streaming: true
+            });
+
+        } catch (error) {
+            console.error('发送PCM块失败:', error);
+        }
+    }
+
     stopRecording() {
         if (!this.isRecording) return;
 
         this.isRecording = false;
-        this.mediaRecorder.stop();
-        
+
+        // Phase 3: 通知服务器停止流式ASR（发送最后的信号）
+        if (this.enableTrueStreaming && this.currentASRSessionId) {
+            this.socket.emit('finalize_streaming_asr', {
+                session_id: this.currentASRSessionId
+            });
+            this.debugLog('Phase 3: 发送ASR结束信号');
+        }
+
+        // Phase 3: 清理真正的流式录音资源（不影响VAD的audioContext）
+        if (this.audioProcessor) {
+            this.audioProcessor.disconnect();
+            this.audioProcessor = null;
+        }
+        if (this.audioSource) {
+            this.audioSource.disconnect();
+            this.audioSource = null;
+        }
+        if (this.streamingAudioContext && this.streamingAudioContext.state !== 'closed') {
+            this.streamingAudioContext.close();
+            this.streamingAudioContext = null;
+        }
+
+        // 清理MediaRecorder（批处理模式）
+        if (this.mediaRecorder) {
+            this.mediaRecorder.stop();
+        }
+
         // 记录客户停止说话的时间点
         this.customerStopTime = Date.now();
-        
+
         // 在持续监听模式下不关闭音频流
         if (!this.isListening && this.audioStream) {
             this.audioStream.getTracks().forEach(track => track.stop());
@@ -1300,6 +1422,37 @@ class AICollectionAgentWS {
             this.updateRecordingUI(false);
         }
         this.debugLog('录音结束，正在处理...');
+    }
+
+    cancelRecording() {
+        // 取消录音（用于语音过短等情况）- 不处理音频数据
+        if (!this.isRecording) return;
+
+        this.isRecording = false;
+
+        // Phase 3: 清理真正的流式录音资源（不影响VAD的audioContext）
+        if (this.audioProcessor) {
+            this.audioProcessor.disconnect();
+            this.audioProcessor = null;
+        }
+        if (this.audioSource) {
+            this.audioSource.disconnect();
+            this.audioSource = null;
+        }
+        if (this.streamingAudioContext && this.streamingAudioContext.state !== 'closed') {
+            this.streamingAudioContext.close();
+            this.streamingAudioContext = null;
+        }
+
+        // 清理MediaRecorder（批处理模式）
+        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+            this.mediaRecorder.stop();
+        }
+
+        // 清空音频数据（不处理）
+        this.audioChunks = [];
+
+        this.debugLog('录音已取消（语音过短）');
     }
 
     updateRecordingUI(recording) {
@@ -1319,6 +1472,20 @@ class AICollectionAgentWS {
         if (this.audioChunks.length === 0) return;
 
         try {
+            // 合并音频数据进行质量验证
+            const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm;codecs=opus' });
+
+            // 音频质量验证
+            if (audioBlob.size < 1000) {
+                this.debugLog('音频数据太小，跳过识别');
+                return;
+            }
+
+            if (audioBlob.size > 10 * 1024 * 1024) {
+                this.debugLog('音频数据过大（>10MB），可能超时');
+                // 继续处理但记录警告
+            }
+
             // 使用流式ASR处理音频
             if (this.isStreamingASRActive && this.currentASRSessionId) {
                 await this.processAudioChunksForStreaming();  // 🔄 WebM → 服务器转WAV → ASR
@@ -1326,7 +1493,7 @@ class AICollectionAgentWS {
                 // 回退到批处理ASR（用于兼容性）
                 await this.processAudioChunksBatch();
             }
-            
+
         } catch (error) {
             console.error('音频处理失败:', error);
             this.debugLog('错误: 音频处理失败 - ' + error.message);
@@ -1552,39 +1719,14 @@ class AICollectionAgentWS {
     async speakInitialGreeting() {
         try {
             const customer = this.currentCustomer;
-            
+
             // 停止任何当前播放的音频
             this.stopCurrentAudio();
-            
-            // 播放预录制的通用问候语 "喂，您好"
-            const greetingAudio = new Audio('greeting.wav');
-            this.currentAudio = greetingAudio;
-            this.isPlayingAudio = true;
-            
-            await new Promise((resolve, reject) => {
-                greetingAudio.onended = () => {
-                    this.currentAudio = null;
-                    this.isPlayingAudio = false;
-                    resolve();
-                };
-                greetingAudio.onerror = (error) => {
-                    this.currentAudio = null;
-                    this.isPlayingAudio = false;
-                    reject(error);
-                };
-                greetingAudio.play().catch(reject);
-            });
-            
-            // 等待2秒看客户是否回应
-            this.debugLog('等待客户回应...');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            // 如果客户在2秒内没有回应，继续说话
-            if (!this.customerHasResponded) {
-                this.debugLog('客户未回应，继续问候流程');
-                await this.continueGreetingSequence(customer);
-            }
-            
+
+            // 直接播放完整问候语，不使用预录制音频
+            this.debugLog('开始播放初始问候语');
+            await this.continueGreetingSequence(customer);
+
         } catch (error) {
             console.error('播放初始问候失败:', error);
             this.debugLog('初始问候失败: ' + error.message);
