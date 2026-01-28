@@ -58,7 +58,17 @@ class AICollectionAgentWS {
         this.currentASRSessionId = null;
         this.isStreamingASRActive = false;
         this.streamingASRResults = [];
-        
+
+        // 语音控制设置
+        this.voiceSettings = {
+            speed: 1.0,
+            pitch: 1.0,
+            volume: 0.8,
+            voice: 'Dylan',
+            tone: 'professional',
+            emotion: 'professional'
+        };
+
         // 初始化
         this.init();
     }
@@ -717,6 +727,188 @@ class AICollectionAgentWS {
         if (testBtn) {
             testBtn.addEventListener('click', () => this.testAudio());
         }
+
+        // 语音控制面板事件绑定
+        this.bindToneControlEvents();
+    }
+
+    bindToneControlEvents() {
+        // 语音控制面板切换
+        const toggleToneControls = document.getElementById('toggle-tone-controls');
+        if (toggleToneControls) {
+            toggleToneControls.addEventListener('click', () => this.toggleToneControls());
+        }
+
+        // 语速控制
+        const voiceSpeed = document.getElementById('voice-speed');
+        const speedValue = document.getElementById('speed-value');
+        if (voiceSpeed && speedValue) {
+            voiceSpeed.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                speedValue.textContent = `${value}x`;
+                this.updateVoiceSettings('speed', value);
+            });
+        }
+
+        // 音调控制
+        const voicePitch = document.getElementById('voice-pitch');
+        const pitchValue = document.getElementById('pitch-value');
+        if (voicePitch && pitchValue) {
+            voicePitch.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                pitchValue.textContent = `${value}x`;
+                this.updateVoiceSettings('pitch', value);
+            });
+        }
+
+        // 音量控制
+        const voiceVolume = document.getElementById('voice-volume');
+        const volumeValue = document.getElementById('volume-value');
+        if (voiceVolume && volumeValue) {
+            voiceVolume.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                volumeValue.textContent = `${Math.round(value * 100)}%`;
+                this.updateVoiceSettings('volume', value);
+            });
+        }
+
+        // 声音选择
+        const voiceSelection = document.getElementById('voice-selection');
+        if (voiceSelection) {
+            voiceSelection.addEventListener('change', (e) => {
+                this.updateVoiceSettings('voice', e.target.value);
+            });
+        }
+
+        // 语调选择
+        const voiceTone = document.getElementById('voice-tone');
+        if (voiceTone) {
+            voiceTone.addEventListener('change', (e) => {
+                this.updateVoiceSettings('tone', e.target.value);
+            });
+        }
+
+        // 情感选择
+        const voiceEmotion = document.getElementById('voice-emotion');
+        if (voiceEmotion) {
+            voiceEmotion.addEventListener('change', (e) => {
+                this.updateVoiceSettings('emotion', e.target.value);
+            });
+        }
+
+        // 测试语音按钮
+        const testVoice = document.getElementById('test-voice');
+        if (testVoice) {
+            testVoice.addEventListener('click', () => this.testVoiceSettings());
+        }
+
+        // 重置语音设置按钮
+        const resetVoice = document.getElementById('reset-voice');
+        if (resetVoice) {
+            resetVoice.addEventListener('click', () => this.resetVoiceSettings());
+        }
+    }
+
+    toggleToneControls() {
+        const content = document.getElementById('tone-content');
+        const btn = document.getElementById('toggle-tone-controls');
+
+        if (content && btn) {
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                btn.textContent = '收起';
+            } else {
+                content.style.display = 'none';
+                btn.textContent = '展开';
+            }
+        }
+    }
+
+    updateVoiceSettings(param, value) {
+        this.voiceSettings[param] = value;
+        this.debugLog(`语音设置更新: ${param} = ${value}`);
+
+        // 发送设置到服务器
+        if (this.isConnected) {
+            this.socket.emit('update_voice_settings', { voiceSettings: this.voiceSettings });
+        }
+    }
+
+    testVoiceSettings() {
+        try {
+            const testMessage = '您好，这是语音控制测试。请听一下当前的语音设置效果如何。';
+
+            this.socket.emit('chat_message', {
+                message: testMessage,
+                messageType: 'voice_test',
+                voiceSettings: this.voiceSettings
+            });
+
+            this.debugLog(`测试语音设置: ${JSON.stringify(this.voiceSettings)}`);
+
+        } catch (error) {
+            console.error('语音设置测试失败:', error);
+            this.debugLog('语音设置测试失败: ' + error.message);
+        }
+    }
+
+    resetVoiceSettings() {
+        // 重置所有语音控制到默认值
+        const defaultSettings = {
+            speed: 1.0,
+            pitch: 1.0,
+            volume: 0.8,
+            voice: 'Dylan',
+            tone: 'professional',
+            emotion: 'professional'
+        };
+
+        // 更新内部状态
+        this.voiceSettings = { ...defaultSettings };
+
+        // 更新UI控件
+        const voiceSpeed = document.getElementById('voice-speed');
+        const speedValue = document.getElementById('speed-value');
+        if (voiceSpeed && speedValue) {
+            voiceSpeed.value = defaultSettings.speed;
+            speedValue.textContent = `${defaultSettings.speed}x`;
+        }
+
+        const voicePitch = document.getElementById('voice-pitch');
+        const pitchValue = document.getElementById('pitch-value');
+        if (voicePitch && pitchValue) {
+            voicePitch.value = defaultSettings.pitch;
+            pitchValue.textContent = `${defaultSettings.pitch}x`;
+        }
+
+        const voiceVolume = document.getElementById('voice-volume');
+        const volumeValue = document.getElementById('volume-value');
+        if (voiceVolume && volumeValue) {
+            voiceVolume.value = defaultSettings.volume;
+            volumeValue.textContent = `${Math.round(defaultSettings.volume * 100)}%`;
+        }
+
+        const voiceSelection = document.getElementById('voice-selection');
+        if (voiceSelection) {
+            voiceSelection.value = defaultSettings.voice;
+        }
+
+        const voiceTone = document.getElementById('voice-tone');
+        if (voiceTone) {
+            voiceTone.value = defaultSettings.tone;
+        }
+
+        const voiceEmotion = document.getElementById('voice-emotion');
+        if (voiceEmotion) {
+            voiceEmotion.value = defaultSettings.emotion;
+        }
+
+        // 发送设置到服务器
+        if (this.isConnected) {
+            this.socket.emit('update_voice_settings', { voiceSettings: this.voiceSettings });
+        }
+
+        this.debugLog('语音设置已重置为默认值');
     }
 
     async initAudioContext() {
@@ -761,40 +953,23 @@ class AICollectionAgentWS {
     }
 
     getBestMediaRecorderFormat() {
-        // 浏览器MediaRecorder格式选择策略
+        // Chrome MediaRecorder格式选择 - 使用WebM/Opus格式
         // 注意: 浏览器录制WebM/Opus格式，服务器会转换为WAV后发送到DashScope ASR
         // DashScope ASR支持: pcm, wav, mp3, opus, speex, aac, amr (不支持WebM容器格式)
-        const userAgent = navigator.userAgent;
-        
-        // Safari兼容性检查
-        if (/Safari/.test(userAgent) && !/Chrome/.test(userAgent)) {
-            this.debugLog("警告: Safari对MediaRecorder支持有限");
-            // Safari主要支持MP4格式
-            if (typeof MediaRecorder !== 'undefined' && 
-                MediaRecorder.isTypeSupported && 
-                MediaRecorder.isTypeSupported("audio/mp4")) {
-                this.debugLog("使用Safari兼容格式: audio/mp4");
-                return "audio/mp4";
-            } else {
-                this.debugLog("Safari MediaRecorder支持检测失败，使用WebM回退");
-            }
-        }
-        
-        // Chrome/Firefox/Edge - 使用WebM/Opus格式 (73.4%市场覆盖)
         const formats = [
-            "audio/webm;codecs=opus",  // 首选 - 广泛支持且性能优秀
-            "audio/webm"               // 回退 - 基础格式兼容性
+            "audio/webm;codecs=opus",  // 首选 - Chrome原生支持
+            "audio/webm"               // 回退 - 基础格式
         ];
-        
+
         for (const format of formats) {
-            if (typeof MediaRecorder !== 'undefined' && 
-                MediaRecorder.isTypeSupported && 
+            if (typeof MediaRecorder !== 'undefined' &&
+                MediaRecorder.isTypeSupported &&
                 MediaRecorder.isTypeSupported(format)) {
                 this.debugLog(`选择MediaRecorder格式: ${format}`);
                 return format;
             }
         }
-        
+
         // 最后回退 - 基础WebM格式
         this.debugLog("回退到基础WebM格式");
         return "audio/webm";

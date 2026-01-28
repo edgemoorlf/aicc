@@ -40,6 +40,7 @@ dashscope.api_key = DASHSCOPE_API_KEY
 # 全局变量
 conversation_history = []
 active_asr_sessions = {}  # 存储活跃的流式ASR会话
+client_voice_settings = {}  # 存储客户端语音设置
 
 # 静态文件服务
 @app.route('/')
@@ -337,7 +338,7 @@ def generate_ai_response(system_prompt, user_message):
     """使用通义千问生成AI回复"""
     try:
         llm_start_time = time.time()
-        
+
         response = Generation.call(
             model='qwen-plus',
             messages=[
@@ -348,60 +349,69 @@ def generate_ai_response(system_prompt, user_message):
             max_tokens=500,
             result_format='message'
         )
-        
+
         llm_latency = int((time.time() - llm_start_time) * 1000)
-        
+
         if response.status_code == 200:
             ai_text = response.output.choices[0].message.content
-            return ai_text.strip()
+            return ai_text.strip(), llm_latency
         else:
             logger.error(f'通义千问API调用失败: {response.status_code}')
             return None, 0
-            
+
     except Exception as e:
         logger.error(f'生成AI回复错误: {str(e)}')
         return None, 0
 
-def generate_tts_audio_streaming(text, segment_index=0, total_segments=1):
+def generate_tts_audio_streaming(text, segment_index=0, total_segments=1, voice_settings=None):
     """使用通义千问TTS生成语音，实时流式发送PCM数据"""
     max_retries = 3
+
+    # 获取语音设置，使用默认值
+    if voice_settings is None:
+        voice_settings = {}
+    voice = voice_settings.get('voice', 'Dylan')
+    speed = voice_settings.get('speed', 1.0)
+    pitch = voice_settings.get('pitch', 1.0)
+    volume = voice_settings.get('volume', 0.8)
+
     for attempt in range(max_retries):
         try:
-            logger.info(f'开始流式TTS音频生成 (尝试 {attempt + 1}/{max_retries}): {text[:30]}...')
-            
+            logger.info(f'开始流式TTS音频生成 (尝试 {attempt + 1}/{max_retries}): {text[:30]}... 声音: {voice}')
+
             tts_start_time = time.time()
-            
+
             # 使用流式方式，生成PCM数据流
             responses = dashscope.audio.qwen_tts.SpeechSynthesizer.call(
-                model="qwen-tts",
-                api_key=DASHSCOPE_API_KEY,  # 显式传递API key
+                model="qwen-tts-latest",
+                api_key=DASHSCOPE_API_KEY,
                 text=text,
-                voice="Cherry",  # 中文女声 - 使用支持的声音
-                stream=True  # 使用流式处理，实时返回PCM数据
+                voice=voice,
+                stream=True
             )
-            
+
             # 检查responses是否为None
             if responses is None:
                 raise ValueError("TTS API返回None响应")
-            
+
             # 实时流式发送PCM数据块
             chunk_count = 0
             first_chunk_time = None
-            
+
             for chunk in responses:
                 if chunk and "output" in chunk and "audio" in chunk["output"] and "data" in chunk["output"]["audio"]:
                     audio_string = chunk["output"]["audio"]["data"]
                     pcm_bytes = base64.b64decode(audio_string)
                     if pcm_bytes:
                         chunk_count += 1
-                        
+
                         # 记录第一个块的时间（TTS首次响应延迟）
                         if first_chunk_time is None:
                             first_chunk_time = time.time()
                             tts_first_chunk_latency = int((first_chunk_time - tts_start_time) * 1000)
-                        
+
                         logger.info(f'流式发送TTS PCM数据块 {chunk_count}: {len(pcm_bytes)} bytes')
-                        
+
                         # 立即通过WebSocket发送PCM数据块
                         socketio.emit('pcm_chunk', {
                             'pcm_data': list(pcm_bytes),
@@ -411,7 +421,8 @@ def generate_tts_audio_streaming(text, segment_index=0, total_segments=1):
                             'text': text,
                             'sample_rate': 24000,  # DashScope TTS输出24kHz
                             'channels': 1,
-                            'bits_per_sample': 16
+                            'bits_per_sample': 16,
+                            'volume': volume
                         })
             
             if chunk_count > 0:
@@ -446,16 +457,16 @@ def generate_tts_audio(text):
     for attempt in range(max_retries):
         try:
             logger.info(f'生成TTS音频 (尝试 {attempt + 1}/{max_retries}): {text[:30]}...')
-            
+
             # 使用流式方式，生成PCM数据流
             responses = dashscope.audio.qwen_tts.SpeechSynthesizer.call(
-                model="qwen-tts",
-                api_key=DASHSCOPE_API_KEY,  # 显式传递API key
+                model="qwen-tts-latest",
+                api_key=DASHSCOPE_API_KEY,
                 text=text,
-                voice="Cherry",  # 中文女声 - 使用支持的声音
-                stream=True  # 使用流式处理，实时返回PCM数据
+                voice="Dylan",
+                stream=True
             )
-            
+
             # 检查responses是否为None
             if responses is None:
                 raise ValueError("TTS API返回None响应")
@@ -719,205 +730,172 @@ class StreamingASRSession:
         self.results = []
         
     def start_recognition(self):
-        """启动流式ASR识别"""
+        """标记ASR会话就绪（延迟启动，等待音频到达时再真正启动）"""
         try:
-            logger.info(f'启动流式ASR会话: {self.session_id}')
-            
-            # 创建回调实例
-            callback = StreamingASRCallback(self)
-            
-            # 创建Recognition实例 - 使用PCM格式
-            self.recognition = Recognition(
-                model="paraformer-realtime-8k-v2",
-                format="pcm",  # 使用PCM格式，因为我们发送的是原始PCM数据（无WAV头）
-                sample_rate=8000,  # 8kHz采样率
-                callback=callback,
-                # 🎯 高级参数优化
-                semantic_punctuation_enabled=True,  # 智能标点符号
-                max_sentence_silence=2000,          # 2秒静音检测，适应自然对话
-                heartbeat=True                      # 心跳保持长连接稳定
-            )
-            
-            # 启动识别
-            self.recognition.start()
+            logger.info(f'ASR会话就绪: {self.session_id}')
             self.is_active = True
-            
-            logger.info(f'流式ASR会话启动成功: {self.session_id}')
+            # 注意：不在这里启动recognition，而是在收到音频时启动
+            # 这样可以避免DashScope ASR因为没有音频而超时
             return True
-            
+
         except Exception as e:
-            logger.error(f'启动流式ASR失败: {e}')
+            logger.error(f'ASR会话初始化失败: {e}')
             return False
-    
+
     def process_complete_webm(self, webm_data):
-        """接收完整的WebM音频文件，转换为WAV后发送到ASR"""
-        if not self.recognition or not self.is_active:
+        """接收完整的WebM音频文件，转换为PCM后发送到ASR"""
+        if not self.is_active:
             logger.warning('ASR会话未激活，跳过音频处理')
             return
 
         try:
-            # 🎯 将完整的WebM文件转换为WAV格式
-            # WebM是容器格式，必须有完整文件才能解析
+            # 🎯 将完整的WebM文件转换为PCM格式
             from pydub import AudioSegment
             import io
 
-            logger.info(f'开始转换WebM到WAV: {len(webm_data)} bytes')
+            logger.info(f'开始转换WebM到PCM: {len(webm_data)} bytes')
 
             # 从完整的WebM字节创建AudioSegment
             webm_io = io.BytesIO(webm_data)
             audio = AudioSegment.from_file(webm_io, format="webm")
 
-            # 转换为8kHz单声道16位WAV（DashScope ASR要求）
+            # 转换为8kHz单声道16位PCM（DashScope ASR要求）
             audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
 
-            # 导出为WAV字节
-            wav_io = io.BytesIO()
-            audio.export(wav_io, format="wav")
-            wav_data = wav_io.getvalue()
+            # 获取原始PCM数据
+            pcm_data = audio.raw_data
 
-            # 跳过WAV头部（44字节），只发送PCM数据
-            pcm_data = wav_data[44:] if len(wav_data) > 44 else wav_data
+            logger.info(f'PCM转换完成: {len(pcm_data)} bytes, 时长: {len(audio)}ms')
 
-            # 发送PCM数据到ASR
-            self.recognition.send_audio_frame(pcm_data)
-            logger.info(f'成功发送PCM数据到ASR: {len(pcm_data)} bytes (从 {len(webm_data)} bytes WebM转换)')
+            # 🎯 每次收到音频时，创建新的Recognition实例并发送
+            # 这是DashScope流式ASR的正确用法：start() -> send_audio_frame() -> stop()
+            self._process_pcm_with_streaming_asr(pcm_data)
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f'WebM转换或ASR发送失败: {error_msg}')
+            logger.error(f'WebM转换或ASR处理失败: {error_msg}')
+            import traceback
+            logger.error(f'错误详情: {traceback.format_exc()}')
 
-            # 🔄 如果ASR会话已停止，自动重启以保持电话连接
-            if "Speech recognition has stopped" in error_msg or "stopped" in error_msg.lower():
-                logger.info(f'🔄 检测到ASR会话停止，自动重启: {self.session_id}')
-                self.restart_recognition()
-    
-    def restart_recognition(self):
-        """重启流式ASR识别（保持电话通话连接）"""
+    def _process_pcm_with_streaming_asr(self, pcm_data):
+        """使用流式ASR处理PCM数据"""
         try:
-            logger.info(f'重启流式ASR会话: {self.session_id}')
-            
-            # 停止当前识别
-            if self.recognition and self.is_active:
-                try:
-                    self.recognition.stop()
-                except:
-                    pass  # 忽略停止错误
-                    
-            # 重新创建回调和识别实例
+            # 创建回调实例
             callback = StreamingASRCallback(self)
-            
+
+            # 创建新的Recognition实例
             self.recognition = Recognition(
                 model="paraformer-realtime-8k-v2",
-                format="pcm",  # 使用PCM格式，因为我们发送的是原始PCM数据（无WAV头）
+                format="pcm",
                 sample_rate=8000,
                 callback=callback,
-                # 🎯 高级参数优化
-                semantic_punctuation_enabled=True,  # 智能标点符号
-                max_sentence_silence=2000,          # 2秒静音检测，适应自然对话
-                heartbeat=True                      # 心跳保持长连接稳定
+                semantic_punctuation_enabled=True,
+                max_sentence_silence=800  # 减少静音检测时间，加快响应
             )
-            
-            # 启动新的识别会话
+
+            # 启动识别
+            logger.info(f'启动流式ASR: {self.session_id}')
             self.recognition.start()
-            self.is_active = True
-            
-            logger.info(f'流式ASR会话重启成功: {self.session_id}')
-            return True
-            
+
+            # 分块发送PCM数据（模拟实时流）
+            # DashScope建议每次发送3200字节（100ms的8kHz 16bit单声道音频）
+            chunk_size = 3200  # 100ms of 8kHz 16-bit mono audio
+            total_chunks = (len(pcm_data) + chunk_size - 1) // chunk_size
+
+            logger.info(f'开始发送PCM数据: {len(pcm_data)} bytes, {total_chunks} chunks')
+
+            for i in range(0, len(pcm_data), chunk_size):
+                chunk = pcm_data[i:i + chunk_size]
+                self.recognition.send_audio_frame(chunk)
+
+            logger.info(f'PCM数据发送完成，等待ASR结果')
+
+            # 停止识别（告诉ASR音频已结束）
+            self.recognition.stop()
+
+            logger.info(f'流式ASR处理完成: {self.session_id}')
+
         except Exception as e:
-            logger.error(f'重启流式ASR失败: {e}')
-            self.is_active = False
-            return False
+            logger.error(f'流式ASR处理失败: {e}')
+            import traceback
+            logger.error(f'错误详情: {traceback.format_exc()}')
     
+    def restart_recognition(self):
+        """重置ASR会话状态"""
+        logger.info(f'重置ASR会话: {self.session_id}')
+        self.recognition = None
+        self.is_active = True
+        self.start_time = time.time()
+        return True
+
     def stop_recognition(self):
-        """停止流式ASR识别"""
-        if self.recognition and self.is_active:
+        """停止ASR会话"""
+        self.is_active = False
+        if self.recognition:
             try:
                 self.recognition.stop()
-                self.is_active = False
-                logger.info(f'流式ASR会话已停止: {self.session_id}')
-            except Exception as e:
-                logger.error(f'停止流式ASR失败: {e}')
+            except:
+                pass
+            self.recognition = None
+        logger.info(f'ASR会话已停止: {self.session_id}')
 
 class StreamingASRCallback:
     """流式ASR回调处理器"""
     def __init__(self, session):
         self.session = session
-        
+
     def on_open(self):
         logger.info(f'流式ASR连接建立: {self.session.session_id}')
-        socketio.emit('asr_connected', {
-            'session_id': self.session.session_id,
-            'status': 'connected'
-        }, room=self.session.client_sid)
-        
+
     def on_event(self, result):
         """接收ASR识别结果"""
         elapsed = int((time.time() - self.session.start_time) * 1000)
         logger.info(f'流式ASR结果 ({elapsed}ms): {result}')
-        
+
         # 保存结果
         self.session.results.append(result)
-        
-        # 立即发送到客户端
-        socketio.emit('asr_result', {
-            'session_id': self.session.session_id,
-            'result': result,
-            'elapsed_ms': elapsed
-        }, room=self.session.client_sid)
-        
-        # 如果是完整句子，提取文本进行AI处理
-        if (result.get('output') and 
-            result['output'].get('sentence') and 
-            result['output']['sentence'].get('sentence_end', False)):
-            
-            text = result['output']['sentence'].get('text', '')
-            if text.strip():
+
+        # 解析结果
+        sentence = result.get_sentence() if hasattr(result, 'get_sentence') else None
+
+        if sentence:
+            # 检查是否是句子结束
+            is_end = False
+            text = ''
+
+            if isinstance(sentence, dict):
+                text = sentence.get('text', '')
+                is_end = sentence.get('end', False) or sentence.get('sentence_end', False)
+            elif isinstance(sentence, list) and len(sentence) > 0:
+                # 可能是句子列表
+                last_sentence = sentence[-1]
+                if isinstance(last_sentence, dict):
+                    text = last_sentence.get('text', '')
+                    is_end = last_sentence.get('end', False) or last_sentence.get('sentence_end', False)
+
+            if text and is_end:
                 logger.info(f'流式ASR完整句子: {text}')
-                # 异步处理AI回复
-                socketio.start_background_task(self.process_asr_text, text)
-    
-    def process_asr_text(self, text):
-        """处理ASR识别的完整文本"""
-        try:
-            # 发送用户消息事件
-            socketio.emit('user_speech_recognized', {
-                'text': text,
-                'timestamp': time.time()
-            }, room=self.session.client_sid)
-            
-            logger.info(f'用户语音识别完成: {text}')
-            
-        except Exception as e:
-            logger.error(f'处理ASR文本失败: {e}')
-        
+                # 发送用户消息事件
+                socketio.emit('user_speech_recognized', {
+                    'text': text,
+                    'timestamp': time.time()
+                }, room=self.session.client_sid)
+
     def on_complete(self):
         logger.info(f'流式ASR识别完成: {self.session.session_id}')
-        
-        # 🔄 自动重启ASR会话以保持持续监听（模拟电话通话）
-        logger.info(f'🔄 自动重启ASR会话以保持电话通话连接: {self.session.session_id}')
-        try:
-            # 重新启动识别
-            self.session.restart_recognition()
-        except Exception as e:
-            logger.error(f'自动重启ASR会话失败: {e}')
-            
         socketio.emit('asr_completed', {
             'session_id': self.session.session_id
         }, room=self.session.client_sid)
-        
+
     def on_error(self, error):
         logger.error(f'流式ASR错误: {error}')
         socketio.emit('asr_error', {
             'session_id': self.session.session_id,
             'error': str(error)
         }, room=self.session.client_sid)
-        
+
     def on_close(self):
         logger.info(f'流式ASR连接关闭: {self.session.session_id}')
-        socketio.emit('asr_disconnected', {
-            'session_id': self.session.session_id
-        }, room=self.session.client_sid)
 
 # ====== 流式ASR WebSocket事件处理 ======
 
@@ -1027,6 +1005,17 @@ def clean_ai_response_for_tts(ai_text):
     
     return cleaned_text.strip()
 
+@socketio.on('update_voice_settings')
+def handle_update_voice_settings(data):
+    """更新客户端语音设置"""
+    try:
+        client_sid = request.sid
+        voice_settings = data.get('voiceSettings', {})
+        client_voice_settings[client_sid] = voice_settings
+        logger.info(f'更新语音设置: {voice_settings}')
+    except Exception as e:
+        logger.error(f'更新语音设置失败: {e}')
+
 @socketio.on('chat_message')
 def handle_chat_message(data):
     """处理聊天消息并流式返回连续音频"""
@@ -1035,47 +1024,53 @@ def handle_chat_message(data):
         message_type = data.get('messageType', 'user')
         customer_context = data.get('customerContext', {})
         conversation_history = data.get('conversationHistory', [])
-        
+        voice_settings = data.get('voiceSettings', None)
+
+        # 如果消息中没有语音设置，尝试从全局设置获取
+        if voice_settings is None:
+            client_sid = request.sid
+            voice_settings = client_voice_settings.get(client_sid, {})
+
         logger.info(f'WebSocket收到消息: {message[:50]}... 类型: {message_type}')
-        
-        # 对于代理问候语，使用流式TTS
-        if message_type == 'agent_greeting':
-            logger.info('处理代理问候语，使用连续流式TTS')
-            generate_tts_audio_streaming(message, 0, 1)
+
+        # 对于代理问候语或语音测试，使用流式TTS
+        if message_type == 'agent_greeting' or message_type == 'voice_test':
+            logger.info(f'处理{message_type}，使用连续流式TTS')
+            generate_tts_audio_streaming(message, 0, 1, voice_settings)
             return
-        
+
         # 构建对话上下文
         system_prompt = build_collection_prompt(customer_context, conversation_history)
-        
+
         # 调用通义千问生成回复
         ai_response, llm_latency = generate_ai_response(system_prompt, message)
-        
+
         if not ai_response:
             emit('error', {'error': '生成AI回复失败'})
             return
-        
+
         # 清理AI回复 - 移除"催收员："前缀但保留内容
         cleaned_response = clean_ai_response_for_tts(ai_response)
-        
+
         # 先发送完整文本用于显示
         emit('text_response', {'text': cleaned_response})
-        
+
         # 将整个回复作为单一连续音频流处理
         logger.info(f'WebSocket连续流式处理完整回复: {cleaned_response[:50]}...')
-        tts_latency = generate_tts_audio_streaming(cleaned_response, 0, 1)
-        
+        tts_latency = generate_tts_audio_streaming(cleaned_response, 0, 1, voice_settings)
+
         if tts_latency is None or tts_latency <= 0:
             logger.error('连续流式音频生成失败')
             tts_latency = 0
-        
+
         # 发送延迟指标到客户端
         emit('latency_metrics', {
             'llm_latency': llm_latency,
             'tts_latency': tts_latency
         })
-        
+
         logger.info(f'WebSocket完成AI回复连续流式处理: {cleaned_response[:50]}... (LLM: {llm_latency}ms, TTS: {tts_latency}ms)')
-        
+
     except Exception as e:
         logger.error(f'WebSocket聊天处理错误: {str(e)}')
         emit('error', {'error': f'处理失败: {str(e)}'})
